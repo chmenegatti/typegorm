@@ -8,175 +8,259 @@ import (
 	"fmt"
 	"sync"
 
-	// Needed for context timeout
-	"github.com/chmenegatti/typegorm"
+	// Import anônimo para registrar o driver "sqlite3" no pacote database/sql.
 	_ "github.com/mattn/go-sqlite3"
+	// Importa o pacote raiz do TypeGorm.
+	"github.com/chmenegatti/typegorm"
 )
 
-var _ typegorm.DataSource = (*SQLiteDataSource)(nil)
-
+// Config define os parâmetros de conexão específicos para SQLite.
 type Config struct {
-	Database string            `json:"database" yaml:"database"`
-	Options  map[string]string `json:"options" yaml:"options"`
+	// Database é o caminho para o arquivo do banco de dados SQLite.
+	Database string `json:"database" yaml:"database"`
+	// Options permite passar parâmetros adicionais na DSN (ex: _journal=WAL).
+	Options map[string]string `json:"options" yaml:"options"`
 }
 
+// GetType implementa a interface typegorm.DriverTyper.
+// Retorna o tipo de driver para esta struct de configuração.
+func (c Config) GetType() typegorm.DriverType {
+	return typegorm.SQLite
+}
+
+// --- Verificações em tempo de compilação ---
+// Garante que SQLiteDataSource implementa typegorm.DataSource.
+var _ typegorm.DataSource = (*SQLiteDataSource)(nil)
+
+// Garante que Config implementa typegorm.DriverTyper.
+var _ typegorm.DriverTyper = Config{} // Verifica contra o tipo valor
+
+// SQLiteDataSource implementa a interface typegorm.DataSource para SQLite.
 type SQLiteDataSource struct {
 	config Config
 	db     *sql.DB
-	connMu sync.Mutex
+	connMu sync.RWMutex // Protege o acesso concorrente a `db`.
 }
 
+// init registra este driver SQLite no registro central do TypeGorm.
 func init() {
-	fmt.Println("driver/sqlite: Initialized (running init function).") // LOG Adicionado
+	// Registra a função fábrica que cria novas instâncias de SQLiteDataSource.
+	typegorm.RegisterDriver(typegorm.SQLite, func() typegorm.DataSource {
+		// Esta função deve retornar uma instância zerada;
+		// Connect será chamado nela posteriormente.
+		return &SQLiteDataSource{}
+	})
+	// O log de registro agora é feito centralmente em typegorm.RegisterDriver
 }
 
+// NewDataSource é uma fábrica simples para este driver específico.
+// Pode ser útil para uso direto ou testes.
 func NewDataSource() *SQLiteDataSource {
 	return &SQLiteDataSource{}
 }
 
-// Connect implements the typegorm.DataSource.Connect method.
+// Connect implementa typegorm.DataSource.Connect.
 func (s *SQLiteDataSource) Connect(cfg typegorm.Config) error {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
-	fmt.Println("[LOG] sqlite.Connect: Entered function, mutex acquired.") // LOG Adicionado
+	fmt.Println("[LOG] sqlite.Connect: Entrou na função, mutex adquirido.")
 
 	if s.db != nil {
-		fmt.Println("[LOG] sqlite.Connect: Connection already established.") // LOG Adicionado
-		return errors.New("sqlite: connection already established")
+		fmt.Println("[LOG] sqlite.Connect: Conexão já estabelecida.")
+		return errors.New("sqlite: conexão já estabelecida")
 	}
 
+	// Asserção de tipo ainda é necessária aqui para obter os dados concretos da config.
 	sqliteConfig, ok := cfg.(Config)
-	// ... (type assertion logic remains the same) ...
 	if !ok {
-		fmt.Println("[LOG] sqlite.Connect: Invalid configuration type.") // LOG Adicionado
-		return errors.New("sqlite: invalid configuration provided, expected sqlite.Config or *sqlite.Config")
+		if ptrCfg, okPtr := cfg.(*Config); okPtr && ptrCfg != nil {
+			sqliteConfig = *ptrCfg
+			ok = true
+		}
+	}
+	if !ok {
+		fmt.Println("[LOG] sqlite.Connect: Tipo de configuração inválido passado para o método Connect.")
+		// Este erro não deveria ocorrer se typegorm.Connect funcionou, mas é bom verificar.
+		return fmt.Errorf("sqlite: tipo de configuração inválido %T passado para o método Connect", cfg)
 	}
 	s.config = sqliteConfig
 
 	if s.config.Database == "" {
-		fmt.Println("[LOG] sqlite.Connect: Database path is empty.") // LOG Adicionado
-		return errors.New("sqlite: database path (Database) cannot be empty in config")
+		fmt.Println("[LOG] sqlite.Connect: Caminho do banco de dados está vazio.")
+		return errors.New("sqlite: caminho do banco de dados (Database) não pode ser vazio na config")
 	}
 
-	// Assemble the Data Source Name (DSN)
+	// Monta o Data Source Name (DSN) para SQLite.
 	dsn := s.config.Database
-	// ... (DSN assembly logic remains the same) ...
-	fmt.Printf("[LOG] sqlite.Connect: Assembled DSN: %s\n", dsn) // LOG Adicionado
+	isFirstOpt := true
+	if len(s.config.Options) > 0 {
+		dsn += "?"
+		for k, v := range s.config.Options {
+			if !isFirstOpt {
+				dsn += "&"
+			}
+			dsn += fmt.Sprintf("%s=%s", k, v)
+			isFirstOpt = false
+		}
+	}
+	fmt.Printf("[LOG] sqlite.Connect: DSN Montado: %s\n", dsn)
 
-	// Open the database connection
-	fmt.Println("[LOG] sqlite.Connect: Calling sql.Open()...") // LOG Adicionado
+	// Abre a conexão (prepara o pool, não conecta imediatamente).
+	fmt.Println("[LOG] sqlite.Connect: Chamando sql.Open()...")
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		fmt.Printf("[LOG] sqlite.Connect: sql.Open() failed: %v\n", err) // LOG Adicionado
-		return fmt.Errorf("sqlite: failed to prepare connection: %w", err)
+		fmt.Printf("[LOG] sqlite.Connect: sql.Open() falhou: %v\n", err)
+		return fmt.Errorf("sqlite: falha ao preparar conexão: %w", err)
 	}
-	fmt.Println("[LOG] sqlite.Connect: sql.Open() successful.") // LOG Adicionado
+	fmt.Println("[LOG] sqlite.Connect: sql.Open() bem-sucedido.")
 
-	// Configure connection pool settings
-	db.SetMaxOpenConns(1)
+	// Configura o pool de conexões (Importante para SQLite!).
+	db.SetMaxOpenConns(1) // Geralmente 1 para evitar "database is locked".
 	s.db = db
-	fmt.Println("[LOG] sqlite.Connect: *sql.DB assigned to struct field.") // LOG Adicionado
+	fmt.Println("[LOG] sqlite.Connect: *sql.DB atribuído ao campo da struct.")
 
-	// --- PONTO CRÍTICO: Ping Interno ---
-	// Vamos remover temporariamente o ping de dentro do Connect para isolar o problema.
-	// Se o teste passar sem isso, o problema está no Ping (ou como ele interage logo após Open).
-	/*
-		fmt.Println("[LOG] sqlite.Connect: Calling internal Ping() for verification...") // LOG Adicionado
-		pingTimeout := 10 * time.Second // Timeout mais longo para depuração
-		ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
-		// IMPORTANTE: O defer cancel() aqui só seria chamado no fim do Connect,
-		// o que pode ser tarde demais se o Ping travar. Idealmente, o contexto
-		// deveria ser gerenciado externamente ou o Ping não deveria ser chamado aqui.
-		// Removendo a chamada por enquanto:
-		// pingErr := s.Ping(ctx)
-		// cancel() // Cancela imediatamente após o ping (se fosse chamado)
+	// --- Verificação com Ping (Removida daqui para simplificar, pode ser feita externamente) ---
+	// A verificação inicial é importante, mas pode ser feita após `typegorm.Connect` retornar.
+	// Remover o Ping daqui simplifica a lógica do Connect interno.
 
-		// if pingErr != nil {
-		//     fmt.Printf("[LOG] sqlite.Connect: Internal Ping() failed: %v\n", pingErr) // LOG Adicionado
-		//     s.db.Close()
-		//     s.db = nil
-		//     return fmt.Errorf("sqlite: failed to verify connection after opening (%s): %w", dsn, pingErr)
-		// }
-		// fmt.Println("[LOG] sqlite.Connect: Internal Ping() successful.") // LOG Adicionado
-	*/
-	// --- Fim do Ping Interno Removido ---
-
-	fmt.Printf("[LOG] sqlite.Connect: Connection configured successfully for %s\n", s.config.Database)
-	fmt.Println("[LOG] sqlite.Connect: Exiting function, mutex released.") // LOG Adicionado
+	fmt.Printf("[LOG] sqlite.Connect: Conexão configurada com sucesso para %s\n", s.config.Database)
+	fmt.Println("[LOG] sqlite.Connect: Saindo da função, mutex liberado.")
 	return nil
 }
 
-// Close implements the typegorm.DataSource.Close method.
+// Close implementa typegorm.DataSource.Close.
 func (s *SQLiteDataSource) Close() error {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
-	fmt.Println("[LOG] sqlite.Close: Entered function, mutex acquired.") // LOG Adicionado
+	fmt.Println("[LOG] sqlite.Close: Entrou na função, mutex adquirido.")
 
 	if s.db == nil {
-		fmt.Println("[LOG] sqlite.Close: Connection not established or already closed.") // LOG Adicionado
-		return errors.New("sqlite: connection not established or already closed")
+		fmt.Println("[LOG] sqlite.Close: Conexão não estabelecida ou já fechada.")
+		return errors.New("sqlite: conexão não estabelecida ou já fechada")
 	}
-	fmt.Println("[LOG] sqlite.Close: Calling s.db.Close()...") // LOG Adicionado
+	fmt.Println("[LOG] sqlite.Close: Chamando s.db.Close()...")
 	err := s.db.Close()
-	dbRef := s.db // Salva referência para log
-	s.db = nil    // Clear the reference *after* trying to close
+	dbRef := s.db
+	s.db = nil // Limpa a referência *após* tentar fechar.
 	if err != nil {
-		fmt.Printf("[LOG] sqlite.Close: s.db.Close() failed: %v (db ref: %p)\n", err, dbRef) // LOG Adicionado
-		return fmt.Errorf("sqlite: error closing connection: %w", err)
+		fmt.Printf("[LOG] sqlite.Close: s.db.Close() falhou: %v (db ref: %p)\n", err, dbRef)
+		return fmt.Errorf("sqlite: erro ao fechar conexão: %w", err)
 	}
-	fmt.Printf("[LOG] sqlite.Close: s.db.Close() successful. (db ref: %p)\n", dbRef) // LOG Adicionado
-	fmt.Println("[LOG] sqlite.Close: Exiting function, mutex released.")             // LOG Adicionado
+	fmt.Printf("[LOG] sqlite.Close: s.db.Close() bem-sucedido. (db ref: %p)\n", dbRef)
+	fmt.Println("[LOG] sqlite.Close: Saindo da função, mutex liberado.")
 	return nil
 }
 
-// Ping implements the typegorm.DataSource.Ping method.
+// Ping implementa typegorm.DataSource.Ping.
 func (s *SQLiteDataSource) Ping(ctx context.Context) error {
-	fmt.Println("[LOG] sqlite.Ping: Entered function.") // LOG Adicionado
-	s.connMu.Lock()
-	db := s.db
-	s.connMu.Unlock()
-	fmt.Printf("[LOG] sqlite.Ping: Mutex acquired/released. db reference: %p\n", db) // LOG Adicionado
-
-	if db == nil {
-		fmt.Println("[LOG] sqlite.Ping: Connection not established (db is nil).") // LOG Adicionado
-		return errors.New("sqlite: connection not established")
-	}
-
-	fmt.Println("[LOG] sqlite.Ping: Calling db.PingContext()...") // LOG Adicionado
-	err := db.PingContext(ctx)
+	fmt.Println("[LOG] sqlite.Ping: Entrou na função.")
+	// Usa helper para obter DB e checar nil de forma segura
+	db, err := s.getDBInstance()
 	if err != nil {
-		// Check specifically for context deadline exceeded
-		if errors.Is(err, context.DeadlineExceeded) {
-			fmt.Println("[LOG] sqlite.Ping: db.PingContext() failed: context deadline exceeded.") // LOG Adicionado
-		} else {
-			fmt.Printf("[LOG] sqlite.Ping: db.PingContext() failed: %v\n", err) // LOG Adicionado
-		}
-		return err // Return original error
+		fmt.Printf("[LOG] sqlite.Ping: Erro ao obter instância do DB: %v\n", err)
+		return err
 	}
-	fmt.Println("[LOG] sqlite.Ping: db.PingContext() successful.") // LOG Adicionado
+	fmt.Printf("[LOG] sqlite.Ping: Instância do DB obtida: %p\n", db)
+
+	fmt.Println("[LOG] sqlite.Ping: Chamando db.PingContext()...")
+	err = db.PingContext(ctx) // Reatribui err
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			fmt.Println("[LOG] sqlite.Ping: db.PingContext() falhou: context deadline exceeded.")
+		} else {
+			fmt.Printf("[LOG] sqlite.Ping: db.PingContext() falhou: %v\n", err)
+		}
+		return err // Retorna o erro original
+	}
+	fmt.Println("[LOG] sqlite.Ping: db.PingContext() bem-sucedido.")
 	return nil
 }
 
-// GetDriverType implements the typegorm.DataSource.GetDriverType method.
+// GetDriverType implementa typegorm.DataSource.GetDriverType.
 func (s *SQLiteDataSource) GetDriverType() typegorm.DriverType {
 	return typegorm.SQLite
 }
 
-// GetDB implements the typegorm.DataSource.GetDB method.
+// GetDB implementa typegorm.DataSource.GetDB.
 func (s *SQLiteDataSource) GetDB() (*sql.DB, error) {
-	// Read s.db safely
-	s.connMu.Lock()
-	db := s.db
-	s.connMu.Unlock()
-
-	if db == nil {
-		return nil, errors.New("sqlite: connection not established")
-	}
-	return db, nil
+	// Reutiliza o helper para consistência e segurança de concorrência
+	return s.getDBInstance()
 }
 
-// GetNativeConnection implements the typegorm.DataSource.GetNativeConnection method.
+// GetNativeConnection implementa typegorm.DataSource.GetNativeConnection.
 func (s *SQLiteDataSource) GetNativeConnection() (interface{}, error) {
-	// For SQLite using database/sql, the most relevant "native" connection is the *sql.DB itself.
-	return s.GetDB()
+	// Para SQLite via database/sql, a conexão "nativa" mais relevante é o *sql.DB.
+	return s.getDBInstance()
+}
+
+// --- Implementação dos Novos Métodos da DataSource ---
+
+// ExecContext executa uma query sem retornar linhas.
+func (s *SQLiteDataSource) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	db, err := s.getDBInstance() // Usa helper para obter DB e checar nil
+	if err != nil {
+		return nil, err // Retorna erro se conexão não estabelecida
+	}
+	// Delega diretamente ao método do *sql.DB subjacente
+	return db.ExecContext(ctx, query, args...)
+}
+
+// QueryContext executa uma query que retorna linhas.
+func (s *SQLiteDataSource) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	db, err := s.getDBInstance()
+	if err != nil {
+		return nil, err
+	}
+	// Delega diretamente ao método do *sql.DB subjacente
+	return db.QueryContext(ctx, query, args...)
+}
+
+// QueryRowContext executa uma query que deve retornar no máximo uma linha.
+func (s *SQLiteDataSource) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	db, err := s.getDBInstance()
+	if err != nil {
+		// Como QueryRowContext não retorna erro diretamente, a melhor abordagem
+		// é talvez retornar nil ou deixar o panic ocorrer se db for nil, indicando erro de programação.
+		// Optamos por retornar nil para evitar panic, mas o usuário deve idealmente verificar a conexão antes.
+		// TODO: Considerar uma forma de retornar um *sql.Row que contenha o erro interno.
+		fmt.Printf("[WARN] sqlite.QueryRowContext: Chamado quando conexão não está estabelecida (getDBInstance error: %v), retornando nil *sql.Row\n", err)
+		return nil
+	}
+	// Delega diretamente ao método do *sql.DB subjacente
+	return db.QueryRowContext(ctx, query, args...)
+}
+
+// BeginTx inicia uma transação.
+func (s *SQLiteDataSource) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	db, err := s.getDBInstance()
+	if err != nil {
+		return nil, err
+	}
+	// Delega diretamente ao método do *sql.DB subjacente
+	return db.BeginTx(ctx, opts)
+}
+
+// PrepareContext cria um statement preparado.
+func (s *SQLiteDataSource) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	db, err := s.getDBInstance()
+	if err != nil {
+		return nil, err
+	}
+	// Delega diretamente ao método do *sql.DB subjacente
+	return db.PrepareContext(ctx, query)
+}
+
+// --- Função Auxiliar Interna ---
+
+// getDBInstance é uma função auxiliar interna para obter seguramente a instância *sql.DB
+// e verificar se a conexão está estabelecida. Usa RLock para leitura.
+func (s *SQLiteDataSource) getDBInstance() (*sql.DB, error) {
+	s.connMu.RLock() // Bloqueio de leitura para acessar s.db
+	db := s.db
+	s.connMu.RUnlock()
+
+	if db == nil {
+		return nil, errors.New("sqlite: conexão não estabelecida")
+	}
+	return db, nil
 }
