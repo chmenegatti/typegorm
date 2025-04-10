@@ -4,6 +4,8 @@ package mongo_test
 import (
 	"context"
 	"errors" // Para errors.Is
+	"fmt"
+	"net/url"
 
 	// Para logs
 	"os"
@@ -27,30 +29,82 @@ import (
 func getTestDocumentStore(t *testing.T) typegorm.DocumentStore {
 	t.Helper()
 
-	mongoURI := os.Getenv("TEST_MONGO_URI")
-	if mongoURI == "" {
-		mongoURI = "mongodb://localhost:27017"
+	// Lê detalhes da conexão do ambiente
+	mongoHost := os.Getenv("TEST_MONGO_HOST")
+	if mongoHost == "" {
+		mongoHost = "localhost"
 	}
+
+	mongoPort := os.Getenv("TEST_MONGO_PORT")
+	if mongoPort == "" {
+		mongoPort = "27017"
+	}
+
 	dbName := os.Getenv("TEST_MONGO_DBNAME")
 	if dbName == "" {
 		dbName = "typegorm_testdb"
 	}
+
+	// --- Lê Credenciais do Ambiente ---
+	mongoUser := os.Getenv("TEST_MONGO_USER")
+	mongoPassword := os.Getenv("TEST_MONGO_PASSWORD")
+	// Defina defaults se fizer sentido para seu setup, ou deixe vazio.
+	// Exemplo:
+	if mongoUser == "" {
+		mongoUser = "root"
+	} // Exemplo
+	if mongoPassword == "" {
+		mongoPassword = "password"
+	} // Exemplo
+
+	// Permite pular testes
 	// if os.Getenv("RUN_MONGO_TESTS") != "true" {
 	// 	t.Skip("Pulando testes de integração MongoDB: RUN_MONGO_TESTS não definida como 'true'")
 	// }
 
-	config := mongo_driver.Config{
-		URI:          mongoURI,
-		DatabaseName: dbName, // Importante definir o DB padrão aqui
+	// --- Constrói a URI de Conexão ---
+	var mongoURI string
+	userInfo := ""
+	// Inclui usuário e senha na URI se fornecidos
+	if mongoUser != "" {
+		userInfo = url.UserPassword(mongoUser, mongoPassword).String() + "@" // Escapa user/pass corretamente
 	}
-	t.Logf("getTestDocumentStore (Mongo): Conectando a %s (DB Padrão: %s)", "[URI OMITIDO]", config.DatabaseName)
 
+	// Monta a URI completa
+	mongoURI = fmt.Sprintf("mongodb://%s%s:%s/",
+		userInfo,
+		mongoHost,
+		mongoPort,
+		// O nome do banco de dados pode ir aqui ou ser definido na Config separadamente
+		// dbName, // Opcional na URI path
+	)
+
+	// Adiciona opções importantes na query string da URI
+	// authSource=admin é comum se o usuário foi criado no banco 'admin'
+	query := url.Values{}
+	query.Set("authSource", "admin") // Ajuste se seu usuário estiver em outro banco
+	// query.Set("replicaSet", "rs0") // Adicione se estiver usando replica set
+	// query.Set("connectTimeoutMS", "10000") // Exemplo
+
+	mongoURI += "?" + query.Encode()
+
+	// Cria a config
+	config := mongo_driver.Config{
+		URI:          mongoURI, // Usa a URI construída
+		DatabaseName: dbName,   // Ainda passamos separadamente
+	}
+
+	// Não logar URI completa se tiver senha!
+	t.Logf("getTestDataSource (Mongo): Conectando (DB Padrão: %s)", config.DatabaseName)
+	// t.Logf("DEBUG URI: %s", mongoURI) // Descomentar SÓ para debug local extremo
+
+	// Conecta via TypeGorm
 	docStore, err := typegorm.ConnectDocumentStore(config)
 	if err != nil {
-		t.Fatalf("getTestDocumentStore: typegorm.ConnectDocumentStore() falhou: %v...", err)
+		t.Fatalf("getTestDataSource: typegorm.ConnectDocumentStore() falhou: %v. Verifique a URI de conexão, credenciais e se o MongoDB está acessível.", err)
 	}
 	if docStore == nil {
-		t.Fatal("...")
+		t.Fatal("getTestDocumentStore: typegorm.ConnectDocumentStore() retornou DocumentStore nulo sem erro")
 	}
 
 	t.Cleanup(func() {
