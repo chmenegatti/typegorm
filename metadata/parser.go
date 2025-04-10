@@ -72,7 +72,7 @@ func Parse(target interface{}) (*EntityMetadata, error) {
 	var firstParseError error // Guarda o primeiro erro de parsing encontrado
 
 	// Itera sobre os campos
-	for i := 0; i < structType.NumField(); i++ {
+	for i := range structType.NumField() {
 		field := structType.Field(i)
 
 		if !field.IsExported() {
