@@ -7,11 +7,35 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/chmenegatti/typegorm/metadata"
+	"github.com/iancoleman/strcase"
 )
+
+type FindOptions struct {
+	// Where: Condições de filtro.
+	// ATENÇÃO: Versão inicial SIMPLES. Usa um mapa onde a CHAVE é a condição SQL
+	// (incluindo placeholder se necessário) e o VALOR é o argumento para essa condição.
+	// As condições são unidas por AND. A ordem de aplicação não é garantida pelo mapa,
+	// mas a ordem dos argumentos passados ao banco corresponderá a uma ordem alfabética das chaves.
+	// Exemplo: map[string]any{"status = ?": 1, "nome_modelo LIKE ?": "Teste%"}
+	// TODO: Evoluir para uma representação mais robusta de WHERE (structs, interfaces).
+	Where map[string]any
+
+	// OrderBy: Define a ordenação. Slice de strings.
+	// Ex: []string{"nome_modelo ASC", "id DESC"}
+	// TODO: Adicionar sanitização/validação dos nomes de coluna e direções (ASC/DESC).
+	OrderBy []string
+
+	// Limit: Número máximo de registros a retornar (>= 0). 0 significa sem limite.
+	Limit int
+
+	// Offset: Número de registros a pular (para paginação) (>= 0).
+	Offset int
+}
 
 // --- Placeholder Helper ---
 
@@ -98,6 +122,106 @@ func Insert(ctx context.Context, ds DataSource, entity any) error {
 	}
 
 	return nil // Retorna nil, indicando sucesso (baseado no retorno do ExecContext)
+}
+
+// Find busca múltiplos registros no banco de dados e preenche o slice fornecido.
+// 'slicePtr' deve ser um ponteiro para um slice de structs mapeáveis (ex: &[]Usuario{}).
+// O slice existente será resetado antes de ser preenchido.
+// 'opts' pode ser nil ou conter opções de filtro, ordenação e paginação.
+// Retorna erro em caso de falha.
+func Find(ctx context.Context, ds DataSource, slicePtr any, opts *FindOptions) error {
+	// 1. Valida Input e Obtém Tipo do Elemento do Slice
+	slicePtrValue := reflect.ValueOf(slicePtr)
+	if slicePtrValue.Kind() != reflect.Ptr || slicePtrValue.IsNil() {
+		return fmt.Errorf("typegorm.Find: slicePtr deve ser um ponteiro não-nilo para um slice, obteve %T", slicePtr)
+	}
+	sliceValue := slicePtrValue.Elem() // Valor do slice em si
+	if sliceValue.Kind() != reflect.Slice {
+		return fmt.Errorf("typegorm.Find: slicePtr deve apontar para um slice, mas aponta para %s", sliceValue.Kind())
+	}
+
+	// Obtém o tipo do *elemento* do slice (ex: Usuario a partir de []Usuario)
+	elementType := sliceValue.Type().Elem()
+	if elementType.Kind() == reflect.Ptr { // Se for slice de ponteiros (ex: []*Usuario), pega o tipo da struct
+		elementType = elementType.Elem()
+	}
+	if elementType.Kind() != reflect.Struct {
+		return fmt.Errorf("typegorm.Find: slice deve ser de structs ou ponteiros para structs, mas elementos são %s", elementType.Kind())
+	}
+
+	// 2. Obtém Metadados e DriverType
+	// Cria uma instância zerada do tipo do elemento para passar ao Parse
+	// Nota: Se elementType for de um pacote não importado diretamente, Parse pode falhar.
+	// Isso geralmente não é problema se o usuário define o tipo no mesmo projeto.
+	zeroElement := reflect.New(elementType).Interface()
+	meta, err := metadata.Parse(zeroElement)
+	if err != nil {
+		return fmt.Errorf("typegorm.Find: erro ao obter metadados para tipo %s: %w", elementType.Name(), err)
+	}
+
+	driverType := ds.GetDriverType()
+	fmt.Printf("[LOG-CRUD] Find: Buscando %s...\n", meta.Name)
+
+	// 3. Construir Query SELECT com Opções
+	sqlQuery, args, columnOrder, err := buildSelectQuery(meta, opts, driverType)
+	if err != nil {
+		return fmt.Errorf("typegorm.Find: erro ao construir query para %s: %w", meta.Name, err)
+	}
+	fmt.Printf("[LOG-CRUD] Find Query (%s) para %s: %s\n", driverType, meta.Name, sqlQuery)
+	fmt.Printf("[LOG-CRUD] Find Args para %s: %v\n", meta.Name, args)
+
+	// 4. Executar QueryContext
+	rows, err := ds.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return fmt.Errorf("typegorm.Find: falha na execução da query (%s) para %s: %w", driverType, meta.Name, err)
+	}
+	defer rows.Close() // Garante que rows seja fechado
+
+	// 5. Processar Resultados e Preencher o Slice
+	// Reseta o slice original para garantir que ele contenha apenas os resultados desta busca
+	sliceValue.Set(reflect.MakeSlice(sliceValue.Type(), 0, 0)) // slice = make([]TipoElemento, 0)
+
+	fmt.Printf("[LOG-CRUD] Find: Iterando sobre os resultados para %s...\n", meta.Name)
+	rowIndex := 0
+	for rows.Next() {
+		// Cria uma nova instância Endereçável do tipo do elemento do slice
+		// Ex: Se slice for []Usuario, cria um ponteiro para um novo Usuario.
+		// Usamos Elem() depois para obter o valor da struct onde Scan irá escrever.
+		newElementPtr := reflect.New(elementType) // Retorna um ponteiro (ex: *Usuario)
+		newElementValue := newElementPtr.Elem()   // Obtém o valor da struct (ex: Usuario)
+
+		// Prepara os destinos do Scan (ponteiros para os campos da nova instância)
+		scanDest, err := buildScanDest(newElementValue, meta, columnOrder) // Passa o valor da struct
+		if err != nil {
+			// Erro ao preparar destinos é fatal para o processamento
+			return fmt.Errorf("typegorm.Find: erro ao preparar destino do Scan na linha %d para %s: %w", rowIndex, meta.Name, err)
+		}
+
+		// Executa o Scan nos ponteiros preparados
+		if err := rows.Scan(scanDest...); err != nil {
+			// Erro no scan de uma linha específica
+			// Poderíamos logar e continuar, ou retornar erro (mais seguro?)
+			return fmt.Errorf("typegorm.Find: falha no Scan na linha %d para %s: %w", rowIndex, meta.Name, err)
+		}
+
+		// Adiciona a nova instância preenchida ao slice original
+		// Se o slice original for de ponteiros (ex: []*Usuario), adicionamos newElementPtr.
+		// Se for de valores (ex: []Usuario), adicionamos newElementValue.
+		if sliceValue.Type().Elem().Kind() == reflect.Ptr {
+			sliceValue.Set(reflect.Append(sliceValue, newElementPtr))
+		} else {
+			sliceValue.Set(reflect.Append(sliceValue, newElementValue))
+		}
+		rowIndex++
+	}
+
+	// Verifica erro final do cursor após o loop
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("typegorm.Find: erro do cursor após iteração para %s: %w", meta.Name, err)
+	}
+
+	fmt.Printf("[LOG-CRUD] Find: Finalizado. %d registros encontrados e carregados para %s.\n", rowIndex, meta.Name)
+	return nil // Sucesso
 }
 
 // FindByID busca uma entidade pelo seu ID e carrega os dados em entityPtr.
@@ -526,4 +650,193 @@ func buildUpdateArgs(entityStructValue reflect.Value, meta *metadata.EntityMetad
 	}
 	args = append(args, pkValue) // Adiciona PK por último para o WHERE
 	return args, nil
+}
+
+// buildSelectQuery constrói a query SELECT completa com base nos metadados e opções.
+// Retorna a string SQL, os argumentos para os placeholders, a ordem das colunas selecionadas, e um erro.
+// buildSelectQuery constrói a query SELECT completa com base nos metadados e opções.
+func buildSelectQuery(meta *metadata.EntityMetadata, opts *FindOptions, driverType DriverType) (string, []any, []*metadata.ColumnMetadata, error) {
+	if len(meta.Columns) == 0 { /* ... erro ... */
+	}
+
+	// 1. Monta SELECT clause (igual antes)
+	var selectColumns []string
+	var columnOrder []*metadata.ColumnMetadata
+	for _, col := range meta.Columns {
+		selectColumns = append(selectColumns, col.ColumnName)
+		columnOrder = append(columnOrder, col)
+	}
+	selectClause := strings.Join(selectColumns, ", ")
+
+	// 2. Monta FROM clause (igual antes)
+	fromClause := meta.TableName
+
+	// 3. Monta WHERE clause e coleta Args (igual antes)
+	whereConditions := []string{}
+	var args []any
+	if meta.DeletedAtColumn != nil {
+		whereConditions = append(whereConditions, fmt.Sprintf("%s IS NULL", meta.DeletedAtColumn.ColumnName))
+	}
+	if opts != nil && len(opts.Where) > 0 {
+		keys := make([]string, 0, len(opts.Where))
+		for k := range opts.Where {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, conditionKey := range keys {
+			value := opts.Where[conditionKey]
+			// Validação básica do placeholder na chave (pode melhorar)
+			if !(strings.Contains(conditionKey, "?") || strings.Contains(conditionKey, "$") || strings.Contains(conditionKey, "@p")) {
+				// Tenta inferir se for só nome de coluna? Ex: where["nome"] = valor -> "nome = ?"
+				// Por simplicidade, mantemos a exigência do placeholder na chave por enquanto.
+				return "", nil, nil, fmt.Errorf("condição Where inválida: chave '%s' deve conter placeholder explícito (?, $N, @pX)", conditionKey)
+			}
+			// Adiciona condição e argumento (confiando na chave por enquanto)
+			whereConditions = append(whereConditions, conditionKey)
+			args = append(args, value)
+		}
+	}
+	whereClause := ""
+	if len(whereConditions) > 0 {
+		whereClause = "WHERE " + strings.Join(whereConditions, " AND ")
+	}
+
+	// 4. Monta ORDER BY clause (COM VALIDAÇÃO - MODIFICADO)
+	orderByClause := ""
+	if opts != nil && len(opts.OrderBy) > 0 {
+		var safeOrderClauses []string // Armazena cláusulas validadas
+
+		for _, orderByItem := range opts.OrderBy {
+			orderByItem = strings.TrimSpace(orderByItem)
+			if orderByItem == "" {
+				continue
+			}
+
+			// Divide por espaço para obter coluna e direção (opcional)
+			parts := strings.Fields(orderByItem)
+			if len(parts) == 0 {
+				continue
+			} // Ignora se for só espaço
+
+			potentialColumnName := parts[0]
+			var validDBColumnName string // Nome da coluna validado
+
+			// Valida se a coluna existe nos metadados (case-insensitive com snake_case)
+			if colMeta, exists := meta.ColumnsByDBName[potentialColumnName]; exists {
+				validDBColumnName = colMeta.ColumnName // Usa o nome exato do DB se encontrado diretamente
+			} else {
+				// Tenta converter para snake_case e verifica de novo
+				inferredSnakeName := strcase.ToSnake(potentialColumnName)
+				if colMetaSnake, existsSnake := meta.ColumnsByDBName[inferredSnakeName]; existsSnake {
+					validDBColumnName = colMetaSnake.ColumnName // Usa a versão snake_case validada
+				} else {
+					// Se não encontrou nem direto nem como snake_case, retorna erro
+					return "", nil, nil, fmt.Errorf("coluna de ordenação inválida ou não mapeada: '%s'", potentialColumnName)
+				}
+			}
+
+			// Valida a direção (ASC/DESC)
+			direction := "ASC" // Padrão é ASC
+			if len(parts) > 1 {
+				dirUpper := strings.ToUpper(parts[1])
+				if dirUpper == "DESC" {
+					direction = "DESC"
+				} else if dirUpper != "ASC" {
+					// Se especificou algo diferente de ASC/DESC, consideramos inválido
+					return "", nil, nil, fmt.Errorf("direção de ordenação inválida: '%s' para coluna '%s' (use ASC ou DESC)", parts[1], validDBColumnName)
+				}
+				// Se for "ASC", já é o default
+			}
+
+			// Adiciona a cláusula validada e formatada corretamente
+			// Não precisamos nos preocupar com SQL Injection aqui, pois validamos
+			// `validDBColumnName` contra os metadados e `direction` só pode ser ASC ou DESC.
+			safeOrderClauses = append(safeOrderClauses, fmt.Sprintf("%s %s", validDBColumnName, direction))
+		} // Fim do loop de opts.OrderBy
+
+		// Monta a cláusula final se houver itens válidos
+		if len(safeOrderClauses) > 0 {
+			orderByClause = "ORDER BY " + strings.Join(safeOrderClauses, ", ")
+		}
+	} // Fim if opts.OrderBy
+
+	// 5. Monta LIMIT / OFFSET clause (igual antes, já consciente do dialeto)
+	limitOffsetClause := ""
+	limit := 0
+	offset := 0
+	hasPagination := false
+	if opts != nil {
+		limit = opts.Limit
+		offset = opts.Offset
+		hasPagination = limit > 0 || offset > 0
+	}
+	placeholderIndex := len(args) // Índice para placeholders continua de onde WHERE parou
+	switch driverType {
+	case SQLite, Postgres, MySQL: /* ... lógica LIMIT/OFFSET ... */
+		if limit > 0 {
+			limitOffsetClause += " LIMIT " + getPlaceholder(driverType, placeholderIndex)
+			args = append(args, limit)
+			placeholderIndex++
+		}
+		if offset > 0 {
+			if limit <= 0 {
+				limitOffsetClause += " LIMIT -1"
+			}
+			limitOffsetClause += " OFFSET " + getPlaceholder(driverType, placeholderIndex)
+			args = append(args, offset)
+			placeholderIndex++
+		}
+	case SQLServer: /* ... lógica OFFSET/FETCH ... */
+		if hasPagination {
+			if orderByClause == "" { /* ... default ORDER BY ou erro ... */
+				if len(meta.PrimaryKeyColumns) == 1 {
+					orderByClause = "ORDER BY " + meta.PrimaryKeyColumns[0].ColumnName + " ASC"
+				} else {
+					return "", nil, nil, errors.New("OFFSET/FETCH SQL Server exige ORDER BY")
+				}
+			}
+			offsetVal := 0
+			if offset > 0 {
+				offsetVal = offset
+			}
+			limitVal := -1
+			if limit > 0 {
+				limitVal = limit
+			}
+			limitOffsetClause += " OFFSET " + getPlaceholder(driverType, placeholderIndex) + " ROWS"
+			args = append(args, offsetVal)
+			placeholderIndex++
+			if limitVal > 0 {
+				limitOffsetClause += " FETCH NEXT " + getPlaceholder(driverType, placeholderIndex) + " ROWS ONLY"
+				args = append(args, limitVal)
+				placeholderIndex++
+			}
+		}
+	default:
+		if hasPagination {
+			fmt.Printf("[WARN] buildSelectQuery: Paginação não implementada para driver %s\n", driverType)
+		}
+	}
+
+	// 6. Monta Query Final (igual antes)
+	var sb strings.Builder
+	sb.WriteString("SELECT ")
+	sb.WriteString(selectClause)
+	sb.WriteString(" FROM ")
+	sb.WriteString(fromClause)
+	if whereClause != "" {
+		sb.WriteString(" ")
+		sb.WriteString(whereClause)
+	}
+	if orderByClause != "" {
+		sb.WriteString(" ")
+		sb.WriteString(orderByClause)
+	}
+	if limitOffsetClause != "" {
+		sb.WriteString(" ")
+		sb.WriteString(limitOffsetClause)
+	}
+	finalQuery := sb.String()
+
+	return finalQuery, args, columnOrder, nil
 }
