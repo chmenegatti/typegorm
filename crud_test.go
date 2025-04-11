@@ -5,7 +5,10 @@ import (
 	"context"
 	"database/sql" // Para verificar dados e sql.Null*
 	"errors"
+	"fmt"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,13 +25,20 @@ import (
 // --- Struct de Exemplo para Teste CRUD ---
 // (Similar à usada no teste do parser)
 type CrudTestModel struct {
-	ID           uint      `typegorm:"primaryKey;autoIncrement"`
-	Nome         string    `typegorm:"column:nome_modelo;notnull;uniqueIndex"` // Índice único implícito
-	Email        *string   `typegorm:"unique;size:150"`                        // Ponteiro para nullable
-	Status       int       `typegorm:"default:1"`
-	CriadoEm     time.Time `typegorm:"createdAt"`
-	AtualizadoEm time.Time `typegorm:"updatedAt"`
-	// DeletadoEm   sql.NullTime `typegorm:"deletedAt"` // Para testes futuros de soft delete/find
+	ID           uint         `typegorm:"primaryKey;autoIncrement"`
+	Nome         string       `typegorm:"column:nome_modelo;notnull;uniqueIndex"` // Índice único implícito
+	Email        *string      `typegorm:"unique;size:150"`                        // Ponteiro para nullable
+	Status       int          `typegorm:"default:1"`
+	CriadoEm     time.Time    `typegorm:"createdAt"`
+	AtualizadoEm time.Time    `typegorm:"updatedAt"`
+	DeletadoEm   sql.NullTime `typegorm:"deletedAt"` // Para testes futuros de soft delete/find
+}
+
+type ModelManualPK struct {
+	Codigo    string  `typegorm:"primaryKey;size:36"` // Ex: UUID ou código customizado
+	Descricao string  `typegorm:"notnull"`
+	Valor     float64 `typegorm:"type:REAL"` // SQLite não tem DECIMAL nativo
+	Ativado   bool    // Sem default explícito aqui
 }
 
 // --- Helper para Configurar DB de Teste (SQLite) ---
@@ -38,7 +48,7 @@ func setupTestDB(t *testing.T) typegorm.DataSource {
 
 	// Usa diretório temporário para o arquivo do banco
 	tempDir := t.TempDir()
-	dbFile := filepath.Join(tempDir, "crud_test.db")
+	dbFile := filepath.Join(tempDir, fmt.Sprintf("crud_test_%s.db", t.Name()))
 	t.Logf("Usando arquivo de banco de dados temporário: %s", dbFile)
 
 	// Configuração SQLite
@@ -55,23 +65,34 @@ func setupTestDB(t *testing.T) typegorm.DataSource {
 
 	// Cria a tabela ANTES de retornar o DataSource
 	// Importante: O schema DEVE corresponder ao esperado pelo parser baseado nas tags da CrudTestModel
-	createSQL := `
+	createSQL1 := `
 	CREATE TABLE IF NOT EXISTS crud_test_models (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		nome_modelo TEXT NOT NULL UNIQUE,
 		email VARCHAR(150) UNIQUE,
 		status INTEGER DEFAULT 1,
 		criado_em DATETIME NOT NULL,
-		atualizado_em DATETIME NOT NULL
-		-- deletado_em DATETIME NULL -- Para futuro soft delete
+		atualizado_em DATETIME NOT NULL,
+		deletado_em DATETIME NULL
 	);`
+	// Schema DDL para ModelManualPK
+	createSQL2 := `
+    CREATE TABLE IF NOT EXISTS model_manual_pks (
+        codigo VARCHAR(36) PRIMARY KEY,
+        descricao TEXT NOT NULL,
+        valor REAL,
+        ativado BOOLEAN
+    );`
 	ctx := context.Background()
-	_, err = ds.ExecContext(ctx, createSQL)
-	if err != nil {
-		ds.Close() // Tenta fechar se a criação da tabela falhar
-		t.Fatalf("Falha ao criar tabela de teste 'crud_test_models': %v", err)
+	if _, err = ds.ExecContext(ctx, createSQL1); err != nil {
+		ds.Close()
+		t.Fatalf("Falha ao criar tabela 'crud_test_models': %v", err)
 	}
-	t.Log("Tabela 'crud_test_models' criada (ou já existia).")
+	if _, err = ds.ExecContext(ctx, createSQL2); err != nil {
+		ds.Close()
+		t.Fatalf("Falha ao criar tabela 'model_manual_pks': %v", err)
+	}
+	t.Log("Tabelas de teste criadas (ou já existiam).")
 
 	// Adiciona Cleanup para fechar a conexão no final do teste
 	t.Cleanup(func() {
@@ -92,10 +113,10 @@ func TestInsert_Basic(t *testing.T) {
 	// 1. Prepara a entidade para inserir (como ponteiro)
 	email := "insert@exemplo.com"
 	modelo := &CrudTestModel{
-		Nome:  "Teste Inserção",
-		Email: &email, // Usa ponteiro para string nullable
+		Nome:   "Teste Inserção",
+		Email:  &email, // Usa ponteiro para string nullable
+		Status: 1,      // <-- DEFINE EXPLICITAMENTE O VALOR DESEJADO
 		// ID é zero (será auto-incrementado)
-		// Status usará o default do banco (ou zero do Go se não houver default na DDL)
 		// CriadoEm e AtualizadoEm serão definidos pelo Insert (via buildInsertArgs)
 	}
 
@@ -172,5 +193,463 @@ func TestInsert_Basic(t *testing.T) {
 	t.Log("Verificação dos dados no banco bem-sucedida.")
 }
 
-// TODO: Adicionar teste para Insert com erro (ex: violação de constraint UNIQUE)
-// TODO: Adicionar teste para Insert com struct sem PK auto-increment (se suportado)
+// Testa FindByID para um registro que existe.
+func TestFindByID_Found(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+
+	// 1. Setup: Insere um registro conhecido
+	email := "findme@exemplo.com"
+	sourceModel := &CrudTestModel{
+		Nome:   "Registro Para Buscar",
+		Email:  &email,
+		Status: 7,
+	}
+	err := typegorm.Insert(ctx, ds, sourceModel)
+	if err != nil {
+		t.Fatalf("Setup falhou: Erro ao inserir registro de teste: %v", err)
+	}
+	if sourceModel.ID == 0 {
+		t.Fatal("Setup falhou: ID do registro inserido é zero")
+	}
+	t.Logf("Registro de teste inserido com ID: %d", sourceModel.ID)
+	// Zera os timestamps da struct original para comparação DeepEqual mais fácil,
+	// pois os valores lidos podem ter granularidade diferente do time.Now() original.
+	sourceModel.CriadoEm = time.Time{}
+	sourceModel.AtualizadoEm = time.Time{}
+
+	// 2. Executa FindByID
+	foundModel := &CrudTestModel{} // Cria um ponteiro para a struct vazia
+	t.Logf("Chamando typegorm.FindByID com ID: %d", sourceModel.ID)
+	err = typegorm.FindByID(ctx, ds, foundModel, sourceModel.ID) // Passa o ponteiro e o ID
+
+	// 3. Verifica Erro
+	if err != nil {
+		t.Fatalf("typegorm.FindByID falhou inesperadamente: %v", err)
+	}
+	t.Log("typegorm.FindByID executado sem erro.")
+
+	// 4. Verifica Dados Encontrados
+	// Zera timestamps lidos para comparar o resto
+	foundModel.CriadoEm = time.Time{}
+	foundModel.AtualizadoEm = time.Time{}
+
+	// Compara os campos relevantes ou a struct inteira (cuidado com timestamps)
+	if !reflect.DeepEqual(sourceModel, foundModel) {
+		t.Errorf("Dados encontrados não batem com os originais.\nEsperado: %+v\nObtido:   %+v", sourceModel, foundModel)
+	} else {
+		t.Logf("Dados encontrados correspondem aos originais (ignorando timestamps): %+v", foundModel)
+	}
+
+	// Verificação específica de ponteiro (Email)
+	if foundModel.Email == nil {
+		t.Error("Email encontrado é nil, mas esperado um valor.")
+	} else if *foundModel.Email != *sourceModel.Email {
+		t.Errorf("Email encontrado '%s' diferente do esperado '%s'", *foundModel.Email, *sourceModel.Email)
+	}
+
+}
+
+// Testa FindByID para um registro que NÃO existe.
+func TestFindByID_NotFound(t *testing.T) {
+	ds := setupTestDB(t) // Configura DB, mas não insere nada relevante
+	ctx := context.Background()
+
+	nonExistentID := uint(999999) // Um ID que certamente não existe
+
+	// 1. Executa FindByID com ID inexistente
+	notFoundModel := &CrudTestModel{}
+	t.Logf("Chamando typegorm.FindByID com ID inexistente: %d", nonExistentID)
+	err := typegorm.FindByID(ctx, ds, notFoundModel, nonExistentID)
+
+	// 2. Verifica Erro
+	if err == nil {
+		t.Fatal("typegorm.FindByID deveria retornar erro para ID inexistente, mas retornou nil")
+	}
+
+	// 3. Verifica SE o erro é sql.ErrNoRows
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("Erro inesperado retornado por FindByID. Esperado 'sql.ErrNoRows', obteve: %v (Tipo: %T)", err, err)
+	} else {
+		t.Logf("Recebeu 'sql.ErrNoRows' esperado para ID inexistente.")
+	}
+
+	// 4. Verifica se a struct destino não foi modificada (opcional)
+	// Como Scan falhou, a struct deve permanecer com seus valores zero.
+	emptyModel := &CrudTestModel{}
+	if !reflect.DeepEqual(notFoundModel, emptyModel) {
+		t.Errorf("Struct destino foi modificada inesperadamente após FindByID falhar: %+v", notFoundModel)
+	}
+}
+
+func TestInsert_UniqueConstraintError(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+
+	// 1. Insere o primeiro registro (bem-sucedido)
+	nomeUnico := "Nome Unico Teste"
+	modelo1 := &CrudTestModel{
+		Nome:   nomeUnico,
+		Status: 1,
+	}
+	err := typegorm.Insert(ctx, ds, modelo1)
+	if err != nil {
+		t.Fatalf("Setup falhou: Insert do primeiro registro falhou inesperadamente: %v", err)
+	}
+	if modelo1.ID == 0 {
+		t.Fatal("Setup falhou: ID do primeiro registro não foi preenchido")
+	}
+	t.Logf("Primeiro registro inserido com ID %d e Nome '%s'", modelo1.ID, nomeUnico)
+
+	// 2. Tenta inserir o segundo registro com o MESMO nome_modelo
+	email2 := "outro@email.com"
+	modelo2 := &CrudTestModel{
+		Nome:   nomeUnico, // Nome repetido!
+		Email:  &email2,
+		Status: 2,
+	}
+	t.Logf("Tentando inserir segundo registro com nome repetido: %+v", modelo2)
+	err = typegorm.Insert(ctx, ds, modelo2)
+
+	// 3. Verifica se o erro ocorreu e se é o esperado
+	if err == nil {
+		t.Fatal("Esperado erro ao inserir registro com nome_modelo duplicado, mas obteve nil")
+	}
+
+	// Verifica o tipo/conteúdo do erro (depende do driver!)
+	// Para SQLite, a mensagem geralmente contém "UNIQUE constraint failed"
+	// Para outros bancos, a verificação seria diferente (ex: verificar código do erro)
+	errorString := err.Error()
+	expectedErrorSubstring := "UNIQUE constraint failed" // Específico do SQLite
+	if !strings.Contains(errorString, expectedErrorSubstring) {
+		t.Errorf("Erro inesperado retornado. Esperado erro contendo '%s', obteve: %v", expectedErrorSubstring, err)
+	} else {
+		t.Logf("Recebeu erro esperado de violação de constraint UNIQUE: %v", err)
+	}
+
+	// 4. (Opcional) Verifica se o segundo registro NÃO foi inserido
+	var count int
+	countErr := ds.QueryRowContext(ctx, "SELECT COUNT(*) FROM crud_test_models WHERE nome_modelo = ?", nomeUnico).Scan(&count)
+	if countErr != nil {
+		t.Errorf("Erro ao verificar contagem de registros após falha: %v", countErr)
+	} else if count != 1 {
+		t.Errorf("Esperado encontrar apenas 1 registro com o nome '%s', mas encontrou %d", nomeUnico, count)
+	}
+}
+
+// Testa o Insert com uma struct que tem PK definida manualmente (não auto-increment).
+func TestInsert_NonAutoIncrementPK(t *testing.T) {
+	ds := setupTestDB(t) // Configura DB e tabela model_manual_pks
+	ctx := context.Background()
+
+	// 1. Prepara a entidade com PK manual
+	pkManual := "codigo-manual-123"
+	modelo := &ModelManualPK{
+		Codigo:    pkManual, // Define a PK explicitamente
+		Descricao: "Item com PK manual",
+		Valor:     99.90,
+		Ativado:   true,
+	}
+
+	// 2. Chama typegorm.Insert
+	t.Logf("Chamando typegorm.Insert para ModeloManualPK: %+v", modelo)
+	err := typegorm.Insert(ctx, ds, modelo)
+
+	// 3. Verifica Erro
+	if err != nil {
+		t.Fatalf("typegorm.Insert falhou para PK manual: %v", err)
+	}
+	t.Log("typegorm.Insert para PK manual executado sem erro.")
+
+	// 4. Verifica se a PK NÃO foi modificada (o valor original deve permanecer)
+	if modelo.Codigo != pkManual {
+		t.Errorf("A PK manual '%s' foi modificada inesperadamente para '%s' após Insert", pkManual, modelo.Codigo)
+	}
+	// Verificar logs: Não deve haver log "[LOG-CRUD] PK AutoIncrement definida..." para este caso.
+
+	// 5. Verifica os Dados Diretamente no Banco
+	t.Logf("Verificando dados inseridos no banco para Codigo = %s", pkManual)
+	var (
+		dbCodigo    string
+		dbDescricao string
+		dbValor     float64
+		dbAtivado   bool
+	)
+	selectSQL := `SELECT codigo, descricao, valor, ativado FROM model_manual_pks WHERE codigo = ?`
+	row := ds.QueryRowContext(ctx, selectSQL, pkManual)
+	scanErr := row.Scan(&dbCodigo, &dbDescricao, &dbValor, &dbAtivado)
+
+	if scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			t.Fatalf("Verificação falhou: Registro com Codigo '%s' não encontrado no banco após Insert.", pkManual)
+		} else {
+			t.Fatalf("Verificação falhou: Erro ao escanear registro inserido: %v", scanErr)
+		}
+	}
+
+	// Compara valores lidos com valores esperados
+	if dbCodigo != modelo.Codigo {
+		t.Errorf("Codigo mismatch: %s vs %s", modelo.Codigo, dbCodigo)
+	}
+	if dbDescricao != modelo.Descricao {
+		t.Errorf("Descricao mismatch: %s vs %s", modelo.Descricao, dbDescricao)
+	}
+	if dbValor != modelo.Valor {
+		t.Errorf("Valor mismatch: %f vs %f", modelo.Valor, dbValor)
+	}
+	if dbAtivado != modelo.Ativado {
+		t.Errorf("Ativado mismatch: %v vs %v", modelo.Ativado, dbAtivado)
+	}
+
+	t.Log("Verificação dos dados (PK Manual) no banco bem-sucedida.")
+}
+
+// Testa o Update básico de um registro existente.
+func TestUpdate_Basic(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+
+	// 1. Setup: Insere registro inicial
+	emailInicial := "update@teste.com"
+	sourceModel := &CrudTestModel{
+		Nome:   "Registro Original",
+		Email:  &emailInicial,
+		Status: 1,
+	}
+	if err := typegorm.Insert(ctx, ds, sourceModel); err != nil {
+		t.Fatalf("Setup falhou: Insert inicial: %v", err)
+	}
+	if sourceModel.ID == 0 {
+		t.Fatal("Setup falhou: ID não preenchido no Insert")
+	}
+	t.Logf("Registro inicial inserido com ID %d", sourceModel.ID)
+
+	// Guarda timestamps originais para comparação
+	criadoOriginal := sourceModel.CriadoEm
+
+	// 2. Modifica a struct em memória
+	novoNome := "Registro Atualizado"
+	novoEmail := "updated@teste.com"
+	novoStatus := 5
+	sourceModel.Nome = novoNome       // Modifica Nome
+	sourceModel.Email = &novoEmail    // Modifica Email
+	sourceModel.Status = novoStatus   // Modifica Status
+	time.Sleep(10 * time.Millisecond) // Pequena pausa para garantir que o timestamp de update será diferente
+	beforeUpdate := time.Now()
+
+	// 3. Executa Update
+	t.Logf("Chamando typegorm.Update para ID %d: %+v", sourceModel.ID, sourceModel)
+	err := typegorm.Update(ctx, ds, sourceModel)
+
+	// 4. Verifica erro do Update
+	if err != nil {
+		t.Fatalf("typegorm.Update falhou inesperadamente: %v", err)
+	}
+	t.Log("typegorm.Update executado sem erro.")
+
+	// 5. Verifica Dados no Banco (usando FindByID)
+	updatedModel := &CrudTestModel{}
+	err = typegorm.FindByID(ctx, ds, updatedModel, sourceModel.ID)
+	if err != nil {
+		t.Fatalf("Verificação falhou: Erro ao buscar registro atualizado com FindByID: %v", err)
+	}
+	t.Logf("Registro encontrado após Update: %+v", updatedModel)
+
+	// Compara campos atualizados
+	if updatedModel.Nome != novoNome {
+		t.Errorf("Verificação falhou: Nome esperado '%s', obteve '%s'", novoNome, updatedModel.Nome)
+	}
+	if updatedModel.Email == nil || *updatedModel.Email != novoEmail {
+		t.Errorf("Verificação falhou: Email esperado '%s', obteve '%v'", novoEmail, updatedModel.Email)
+	}
+	if updatedModel.Status != novoStatus {
+		t.Errorf("Verificação falhou: Status esperado %d, obteve %d", novoStatus, updatedModel.Status)
+	}
+
+	// Verifica Timestamps
+	if updatedModel.CriadoEm.IsZero() || updatedModel.CriadoEm.Equal(criadoOriginal) || updatedModel.CriadoEm.After(beforeUpdate) {
+		// CriadoEm não deve mudar no Update, deve ser igual ao original (com alguma margem para precisão do DB)
+		// Aqui apenas verificamos se não é zero e se não é igual ao AtualizadoEm (a menos que update seja muito rápido)
+		// Uma verificação mais precisa compararia com o criadoOriginal.
+		t.Errorf("Verificação falhou: CriadoEm inesperado: %s (Original era ~%s)", updatedModel.CriadoEm, criadoOriginal)
+	} else {
+		t.Logf("CriadoEm verificado: %s", updatedModel.CriadoEm)
+	}
+
+	if updatedModel.AtualizadoEm.IsZero() || updatedModel.AtualizadoEm.Before(beforeUpdate) {
+		t.Errorf("Verificação falhou: AtualizadoEm (%s) deveria ser após o início do update (%s)", updatedModel.AtualizadoEm, beforeUpdate)
+	} else {
+		t.Logf("AtualizadoEm verificado: %s", updatedModel.AtualizadoEm)
+	}
+
+	if updatedModel.CriadoEm.Equal(updatedModel.AtualizadoEm) && time.Since(beforeUpdate) > 5*time.Millisecond {
+		// Se passou algum tempo, eles deveriam ser diferentes
+		t.Errorf("Verificação falhou: CriadoEm e AtualizadoEm são iguais (%s), mas deveriam diferir após Update", updatedModel.CriadoEm)
+	}
+}
+
+// Testa a falha do Update para um registro que não existe.
+func TestUpdate_NotFound(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+
+	nonExistentID := uint(999999)
+	nonExistentModel := &CrudTestModel{
+		ID:     nonExistentID, // Usa um ID que não existe
+		Nome:   "Nao Existe",
+		Status: 1,
+	}
+
+	t.Logf("Tentando chamar typegorm.Update para ID inexistente %d", nonExistentID)
+	err := typegorm.Update(ctx, ds, nonExistentModel)
+
+	// Verifica se o erro esperado ocorreu (registro não encontrado / 0 linhas afetadas)
+	if err == nil {
+		t.Fatal("typegorm.Update deveria retornar erro para ID inexistente, mas retornou nil")
+	}
+
+	// Verifica se o erro contém a mensagem esperada de "registro não encontrado"
+	expectedErrorSubstring := "registro com PK" // Parte da mensagem de erro em Update
+	expectedErrorSubstring2 := "não encontrado"
+	if !strings.Contains(err.Error(), expectedErrorSubstring) || !strings.Contains(err.Error(), expectedErrorSubstring2) {
+		t.Errorf("Erro inesperado retornado por Update. Esperado erro contendo '%s' e '%s', obteve: %v", expectedErrorSubstring, expectedErrorSubstring2, err)
+	} else {
+		t.Logf("Recebeu erro esperado ao tentar atualizar registro inexistente: %v", err)
+	}
+}
+
+// Testa o Soft Delete (atualiza DeletadoEm).
+func TestDelete_Soft(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+
+	// 1. Setup: Insere registro
+	modelToSoftDelete := &CrudTestModel{Nome: "Para Soft Delete", Status: 1}
+	if err := typegorm.Insert(ctx, ds, modelToSoftDelete); err != nil {
+		t.Fatalf("Setup falhou: Insert: %v", err)
+	}
+	if modelToSoftDelete.ID == 0 {
+		t.Fatal("Setup falhou: ID zero após Insert")
+	}
+	recordID := modelToSoftDelete.ID
+	t.Logf("Registro inserido para Soft Delete com ID: %d", recordID)
+
+	// 2. Executa Delete (que deve fazer Soft Delete por causa do DeletadoEm na struct)
+	t.Logf("Chamando typegorm.Delete para ID %d (esperado Soft Delete)...", recordID)
+	err := typegorm.Delete(ctx, ds, modelToSoftDelete)
+
+	// 3. Verifica Erro do Delete
+	if err != nil {
+		t.Fatalf("typegorm.Delete (Soft) falhou inesperadamente: %v", err)
+	}
+	t.Log("typegorm.Delete (Soft) executado sem erro.")
+
+	// 4. Verifica no Banco se DeletadoEm foi preenchido
+	t.Logf("Verificando DeletadoEm no banco para ID = %d", recordID)
+	var dbDeletadoEm sql.NullTime
+	checkSQL := `SELECT deletado_em FROM crud_test_models WHERE id = ?`
+	err = ds.QueryRowContext(ctx, checkSQL, recordID).Scan(&dbDeletadoEm)
+	if err != nil {
+		t.Fatalf("Verificação falhou: Erro ao buscar registro após Delete: %v", err)
+	}
+
+	if !dbDeletadoEm.Valid {
+		t.Error("Verificação falhou: DeletadoEm deveria estar Válido (não NULL) após Soft Delete, mas está NULL.")
+	} else if dbDeletadoEm.Time.IsZero() {
+		t.Error("Verificação falhou: DeletadoEm.Time não deveria ser Zero após Soft Delete.")
+	} else {
+		t.Logf("Verificação bem-sucedida: DeletadoEm no banco é: %s (Valid: %v)", dbDeletadoEm.Time, dbDeletadoEm.Valid)
+	}
+
+	// 5. Verifica se FindByID agora retorna ErrNoRows para este ID
+	t.Logf("Verificando se FindByID ignora o registro soft-deletado (ID %d)...", recordID)
+	notFoundModel := &CrudTestModel{}
+	err = typegorm.FindByID(ctx, ds, notFoundModel, recordID)
+
+	if err == nil {
+		t.Error("FindByID deveria retornar erro para registro soft-deletado, mas retornou nil")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("Erro inesperado retornado por FindByID após Soft Delete. Esperado sql.ErrNoRows, obteve: %v", err)
+	} else {
+		t.Log("FindByID retornou sql.ErrNoRows esperado para registro soft-deletado.")
+	}
+}
+
+// Testa o Hard Delete (DELETE FROM ...) para struct sem DeletadoEm.
+func TestDelete_Hard(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+
+	// 1. Setup: Insere registro com PK manual
+	modelToHardDelete := &ModelManualPK{Codigo: "hard-delete-1", Descricao: "Registro para Hard Delete"}
+	if err := typegorm.Insert(ctx, ds, modelToHardDelete); err != nil {
+		t.Fatalf("Setup falhou: Insert: %v", err)
+	}
+	recordID := modelToHardDelete.Codigo
+	t.Logf("Registro inserido para Hard Delete com Codigo: %s", recordID)
+
+	// 2. Executa Delete (deve fazer Hard Delete)
+	t.Logf("Chamando typegorm.Delete para Codigo %s (esperado Hard Delete)...", recordID)
+	err := typegorm.Delete(ctx, ds, modelToHardDelete) // Passa o modelo com a PK preenchida
+
+	// 3. Verifica Erro do Delete
+	if err != nil {
+		t.Fatalf("typegorm.Delete (Hard) falhou inesperadamente: %v", err)
+	}
+	t.Log("typegorm.Delete (Hard) executado sem erro.")
+
+	// 4. Verifica no Banco se o registro realmente sumiu
+	t.Logf("Verificando ausência no banco para Codigo = %s", recordID)
+	var count int
+	// Tentamos contar quantos registros existem com aquele código
+	checkSQL := `SELECT COUNT(*) FROM model_manual_pks WHERE codigo = ?`
+	err = ds.QueryRowContext(ctx, checkSQL, recordID).Scan(&count)
+	if err != nil {
+		// Scan não deve falhar aqui, pois COUNT(*) sempre retorna uma linha
+		t.Fatalf("Verificação falhou: Erro ao executar COUNT(*) após Delete: %v", err)
+	}
+
+	if count != 0 {
+		t.Errorf("Verificação falhou: Esperado COUNT=0 para registro deletado (Hard Delete), mas obteve %d", count)
+	} else {
+		t.Log("Verificação bem-sucedida: Registro não encontrado no banco após Hard Delete (COUNT=0).")
+	}
+}
+
+// Testa explicitamente se FindByID ignora registros que sofreram soft delete.
+// Redundante com TestDelete_Soft, mas bom para clareza.
+func TestFindByID_IgnoresSoftDeleted(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+
+	// 1. Setup: Insere um registro
+	model := &CrudTestModel{Nome: "Para Soft Delete Direto", Status: 1}
+	if err := typegorm.Insert(ctx, ds, model); err != nil {
+		t.Fatalf("Setup falhou: Insert: %v", err)
+	}
+	recordID := model.ID
+	t.Logf("Registro inserido com ID: %d", recordID)
+
+	// 2. Setup: Aplica Soft Delete manualmente via SQL direto
+	softDeleteTime := time.Now()
+	updateSQL := `UPDATE crud_test_models SET deletado_em = ? WHERE id = ?`
+	_, err := ds.ExecContext(ctx, updateSQL, softDeleteTime, recordID)
+	if err != nil {
+		t.Fatalf("Setup falhou: Não foi possível aplicar soft delete manual: %v", err)
+	}
+	t.Logf("Soft delete manual aplicado para ID %d com tempo %s", recordID, softDeleteTime)
+
+	// 3. Executa FindByID para o ID soft-deletado
+	foundModel := &CrudTestModel{}
+	t.Logf("Chamando FindByID para registro soft-deletado (ID %d)...", recordID)
+	err = typegorm.FindByID(ctx, ds, foundModel, recordID)
+
+	// 4. Verifica se retornou ErrNoRows
+	if err == nil {
+		t.Error("FindByID deveria retornar erro para registro soft-deletado, mas retornou nil")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("Erro inesperado retornado por FindByID. Esperado sql.ErrNoRows, obteve: %v", err)
+	} else {
+		t.Log("FindByID retornou sql.ErrNoRows esperado para registro soft-deletado.")
+	}
+}

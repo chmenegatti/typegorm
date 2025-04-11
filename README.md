@@ -27,237 +27,90 @@ A inspiração vem do popular [TypeORM](https://typeorm.io/) do mundo TypeScript
 
 ## ✨ Funcionalidades
 
-### Implementadas ✅
+Que maravilha! Todos os testes passando, incluindo o CRUD básico com soft delete e os drivers SQL e MongoDB iniciais, é um progresso fantástico! 🚀
 
-* **Gerenciamento de Conexão Unificado:**
-    * API `typegorm.Connect` para conectar a diferentes bancos.
-    * Sistema de registro de drivers.
-* **Interface `DataSource`:**
-    * Abstração para interação básica com o banco.
-    * Métodos `Connect`, `Close`, `Ping`.
-    * Métodos para execução direta de SQL: `ExecContext`, `QueryContext`, `QueryRowContext`.
-    * Métodos para transações: `BeginTx`.
-    * Métodos para prepared statements: `PrepareContext`.
-* **Drivers Suportados:**
-    * SQLite (`github.com/mattn/go-sqlite3`)
-    * PostgreSQL (`github.com/jackc/pgx/v5/stdlib`)
-    * MySQL / MariaDB (`github.com/go-sql-driver/mysql`)
+Você tem razão, com várias peças se encaixando, é bom ter uma lista clara das próximas etapas para mantermos o foco e a organização no desenvolvimento do nosso TypeGorm brasileiro.
 
-### Planejadas 🔧
+Aqui está um resumo do que fizemos e uma lista sugerida para os próximos passos:
 
-* **Mapeamento Objeto-Relacional/Documento:**
-    * Definição de entidades via Structs Go e Tags (`typegorm:"..."`).
-    * Geração automática de esquema (opcional).
-    * Suporte a tipos customizados.
-* **Operações CRUD:** Métodos `Save`, `Find`, `FindOne`, `Delete`, etc. baseados em entidades.
-* **Relações:** Suporte a `OneToOne`, `OneToMany`, `ManyToOne`, `ManyToMany`.
-* **Query Builder Fluente:** API para construir consultas complexas de forma programática e segura.
-* **Migrations:** Ferramentas para gerenciar a evolução do schema do banco de dados.
-* **Drivers Adicionais:**
-    * SQL Server (`github.com/microsoft/go-mssqldb`)
-    * MongoDB (`go.mongodb.org/mongo-driver`)
-    * Redis (`github.com/go-redis/redis`)
-    * Oracle (`github.com/godror/godror`)
-* **Listeners/Subscribers:** Hooks para eventos do ciclo de vida das entidades.
-* **Caching:** Estratégias para cache de consultas.
-* **Soft Delete:** Suporte integrado para exclusão lógica.
+---
 
-## ⚙️ Instalação
+## 🗺️ Roteiro TypeGorm (Abril de 2025)
 
-Para adicionar o TypeGorm ao seu projeto Go:
+**Fundação e Conexão:**
 
-```bash
-go get github.com/chmenegatti/typegorm
-```
+* [✅] Estrutura básica do projeto Go (`go mod init`).
+* [✅] Interface `DataSource` (para SQL) definida.
+* [✅] Interface `DocumentStore` (para NoSQL/Mongo) definida.
+* [✅] Sistema de Registro de Drivers (SQL e NoSQL via `init` e `Register...Driver`).
+* [✅] Fábricas de Conexão (`typegorm.Connect` e `typegorm.ConnectDocumentStore`) usando `DriverTyper`.
+* [✅] **Drivers SQL:**
+    * [✅] SQLite (Implementado e Testado)
+    * [✅] PostgreSQL (Implementado e Testado)
+    * [✅] MySQL / MariaDB (Implementado e Testado)
+* [✅] **Drivers NoSQL:**
+    * [✅] MongoDB (Implementado e Testado - Conexão/Ping/Operações básicas via driver nativo)
 
-Você também precisará importar os pacotes dos drivers específicos que pretende usar, utilizando o identificador branco (_), para que eles possam se registrar durante a inicialização.
+**Metadados e Mapeamento:**
 
+* [✅] Definição das Structs de Metadados (`EntityMetadata`, `ColumnMetadata`).
+* [✅] Parser de Tags (`metadata.Parse`) implementado com:
+    * [✅] Leitura de tags `typegorm:"..."`.
+    * [✅] Parsing de tags comuns (pk, column, type, size, unique, index, default, etc).
+    * [✅] Tratamento de colunas especiais (`createdAt`, `updatedAt`, `deletedAt`).
+    * [✅] Inferência de nome de tabela/coluna (convenção snake\_case).
+    * [✅] Inferência de nulidade básica.
+    * [✅] Cache de metadados implementado.
+    * [✅] **Parser Testado e Validado**.
 
-```bash
-go get github.com/mattn/go-sqlite3        # Exemplo para SQLite
-go get github.com/jackc/pgx/v5/stdlib      # Exemplo para PostgreSQL (via pgx)
-go get github.com/go-sql-driver/mysql    # Exemplo para MySQL/MariaDB
-```
+**Operações ORM (SQL - Camada Inicial):**
 
-🏁 Começando a Usar (Exemplos Atuais com DataSource)
-O uso atual foca na obtenção de uma DataSource e na execução de operações básicas de banco de dados através de seus métodos.
+* [✅] Função `typegorm.Insert` implementada (usa metadados, trata autoIncrement PK, createdAt/updatedAt).
+* [✅] Função `typegorm.FindByID` implementada (usa metadados, scan dinâmico, trata `sql.ErrNoRows`, respeita soft delete).
+* [✅] Função `typegorm.Update` implementada (usa metadados, atualiza todos os campos não-PK, trata `updatedAt`).
+* [✅] Função `typegorm.Delete` implementada (com suporte a Hard e Soft Delete baseado em `deletedAt`).
+* [✅] **Testes de CRUD (Insert, FindByID, Update, Delete/SoftDelete) implementados e passando.**
 
-```go
-package main
+---
 
-import (
-	"context"
-	"database/sql" // Para sql.ErrNoRows e sql.TxOptions
-	"errors"
-	"fmt"
-	"log"
-	"time"
+## 🎯 Próximas Etapas Sugeridas:
 
-	// 1. Importa o pacote raiz do TypeGorm
-	"github.com/chmenegatti/typegorm"
+Aqui estão as próximas fases lógicas, em uma ordem sugerida (mas podemos ajustar!):
 
-	// 2. Importa as CONFIGURAÇÕES do driver desejado
-	"github.com/chmenegatti/typegorm/driver/postgres"
-	// "github.com/chmenegatti/typegorm/driver/mysql"
-	// "github.com/chmenegatti/typegorm/driver/sqlite"
+1.  👉 **Implementar `typegorm.Find` (Busca Múltipla - SQL):**
+    * Criar uma função `Find(ctx, ds, slicePtr, options...)` que busca múltiplos registros.
+    * `slicePtr` seria um ponteiro para um slice da struct (ex: `&[]Usuario{}`).
+    * `options` poderia ser uma struct ou argumentos variádicos para definir filtros (`WHERE`), ordenação (`ORDER BY`), limite (`LIMIT`) e offset (`OFFSET`).
+    * Internamente, construiria a query `SELECT`, usaria `ds.QueryContext`, iteraria sobre os `rows`, e faria o `Scan` dinâmico para preencher o slice.
+    * **Por que agora?** Completa o conjunto básico de operações de leitura (FindByID, Find) usando a infraestrutura atual antes de avançar para abstrações maiores.
 
-	// 3. Importa os DRIVERS com '_' para registrar (efeito colateral do init())
-	_ "github.com/chmenegatti/typegorm/driver/postgres" // Para Postgres
-	// _ "github.com/chmenegatti/typegorm/driver/mysql"    // Para MySQL
-	// _ "github.com/chmenegatti/typegorm/driver/sqlite"   // Para SQLite
-)
+2.  **Definir e Parsear Relações:**
+    * Atualizar `metadata.go` para incluir informações sobre relações (`OneToOne`, `OneToMany`, `ManyToMany`) em `EntityMetadata` / `ColumnMetadata`.
+    * Atualizar `metadata/parser.go` para reconhecer e parsear tags de relacionamento (ex: `relation:`, `joinColumn:`, `mappedBy:`, `joinTable:`).
+    * Escrever testes para o parsing das relações.
+    * **Por que depois do Find?** Permite focar primeiro em operações de tabela única antes de introduzir a complexidade das junções e carregamento de dados relacionados.
 
-func main() {
-	fmt.Println("🚀 Iniciando exemplo TypeGorm...")
+3.  **Iniciar o Query Builder:**
+    * Começar a projetar a API fluente (ex: `typegorm.QueryBuilder(ds).Model(&Usuario{}).Select(...).Where(...).OrderBy(...).Limit(...)`).
+    * Implementar a construção de queries SQL baseada nos metadados e nas chamadas da API fluente.
+    * Integrar com `GetOne()` (similar a `FindByID`), `GetMany()` (similar a `Find`), `Exec()` (para Updates/Deletes via QB).
+    * **Por que depois das Relações?** O QB se beneficia muito de ter os metadados de relacionamento para construir JOINs automaticamente.
 
-	// --- Configuração da Conexão (Exemplo com PostgreSQL) ---
-	// Use a struct de Config do pacote do driver específico
-	pgConfig := postgres.Config{
-		Host:     "localhost", // Ou leia de env vars
-		Port:     5432,
-		Username: "postgres",
-		Password: "password",
-		Database: "testdb",
-		SSLMode:  "disable",
-	}
+4.  **Implementar Driver SQL Server:**
+    * Seguir o padrão dos outros drivers SQL (criar `driver/sqlserver`, Config, DataSource, registro, testes).
+    * **Por que aqui?** Pode ser feito a qualquer momento, mas talvez seja bom ter mais funcionalidades do ORM antes de adicionar outro driver SQL similar.
 
-	// --- Conexão ---
-	fmt.Println("Conectando ao banco de dados...")
-	// Use typegorm.Connect passando a struct de configuração
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second) // Contexto com timeout para conexão/ping inicial
-	defer cancel()
+5.  **Implementar Operações ORM para MongoDB:**
+    * Adaptar/criar funções como `Insert`, `FindByID`, `Find`, `Update`, `Delete` que funcionem com a interface `DocumentStore` e usem a API do driver Mongo (`bson` para filtros/updates, `primitive.ObjectID` para IDs, etc.), possivelmente reutilizando os metadados (ou usando tags `bson`).
+    * **Por que depois do QB SQL?** Permite focar em solidificar a experiência SQL ORM primeiro.
 
-	dataSource, err := typegorm.Connect(pgConfig)
-	if err != nil {
-		log.Fatalf("Falha ao conectar: %v", err)
-	}
-	fmt.Println("✅ Conectado com sucesso!")
+6.  **Migrations:**
+    * Projetar e implementar a ferramenta de linha de comando (`typegorm migrate ...`).
+    * Lógica para comparar metadados com o schema do banco e gerar/executar SQL DDL.
 
-	// Garante que a conexão seja fechada ao final
-	defer func() {
-		fmt.Println("Fechando conexão...")
-		if err := dataSource.Close(); err != nil {
-			log.Printf("⚠️ Erro ao fechar conexão: %v", err)
-		} else {
-			fmt.Println("🔌 Conexão fechada.")
-		}
-	}()
+7.  **Drivers Adicionais (Redis, Oracle):** Adicionar conforme necessário/demandado.
 
-	// --- Exemplo 1: Ping ---
-	fmt.Println("Pingando o banco...")
-	if err := dataSource.Ping(ctx); err != nil {
-		log.Fatalf("Falha no Ping: %v", err)
-	}
-	fmt.Println("✅ Ping bem-sucedido!")
-
-	// --- Exemplo 2: ExecContext (Criar Tabela e Inserir) ---
-	fmt.Println("Executando ExecContext...")
-	// Placeholders ($1, $2 no PG; ? no MySQL/SQLite) são gerenciados pelo driver subjacente
-	_, err = dataSource.ExecContext(ctx, `DROP TABLE IF EXISTS exemplo_typegorm;`) // Limpeza
-	if err != nil { log.Printf("⚠️ Aviso ao dropar tabela (pode não existir): %v", err) }
-
-	createSQL := `CREATE TABLE exemplo_typegorm (id SERIAL PRIMARY KEY, nome TEXT, valor INT);` // PG syntax
-	// createSQL := `CREATE TABLE exemplo_typegorm (id INT AUTO_INCREMENT PRIMARY KEY, nome TEXT, valor INT);` // MySQL syntax
-	_, err = dataSource.ExecContext(ctx, createSQL)
-	if err != nil {
-		log.Fatalf("Falha no ExecContext (CREATE): %v", err)
-	}
-
-	insertSQL := `INSERT INTO exemplo_typegorm (nome, valor) VALUES ($1, $2), ($3, $4);` // PG syntax
-	// insertSQL := `INSERT INTO exemplo_typegorm (nome, valor) VALUES (?, ?), (?, ?);` // MySQL/SQLite syntax
-	result, err := dataSource.ExecContext(ctx, insertSQL, "Item A", 100, "Item B", 200)
-	if err != nil {
-		log.Fatalf("Falha no ExecContext (INSERT): %v", err)
-	}
-	rowsAffected, _ := result.RowsAffected()
-	fmt.Printf("✅ ExecContext (CREATE/INSERT) bem-sucedido. Linhas afetadas no INSERT: %d\n", rowsAffected)
-
-	// --- Exemplo 3: QueryContext (Selecionar Múltiplas Linhas) ---
-	fmt.Println("Executando QueryContext...")
-	querySQL := `SELECT id, nome, valor FROM exemplo_typegorm WHERE valor >= $1 ORDER BY id;` // PG syntax
-	// querySQL := `SELECT id, nome, valor FROM exemplo_typegorm WHERE valor >= ? ORDER BY id;` // MySQL/SQLite syntax
-	rows, err := dataSource.QueryContext(ctx, querySQL, 150)
-	if err != nil {
-		log.Fatalf("Falha no QueryContext: %v", err)
-	}
-	defer rows.Close() // Muito importante fechar rows!
-
-	fmt.Println("Resultados do QueryContext:")
-	for rows.Next() {
-		var id int
-		var nome string
-		var valor int
-		if err := rows.Scan(&id, &nome, &valor); err != nil {
-			log.Printf("⚠️ Erro no Scan: %v", err)
-			continue
-		}
-		fmt.Printf("  - ID: %d, Nome: %s, Valor: %d\n", id, nome, valor)
-	}
-	if err := rows.Err(); err != nil { // Verifica erro após o loop
-		log.Printf("⚠️ Erro durante iteração de rows: %v", err)
-	}
-	fmt.Println("✅ QueryContext finalizado.")
-
-	// --- Exemplo 4: QueryRowContext (Selecionar Uma Linha) ---
-	fmt.Println("Executando QueryRowContext...")
-	var nomeItemA string
-	queryRowSQL := `SELECT nome FROM exemplo_typegorm WHERE id = $1;` // PG syntax
-	// queryRowSQL := `SELECT nome FROM exemplo_typegorm WHERE id = ?;` // MySQL/SQLite syntax
-	row := dataSource.QueryRowContext(ctx, queryRowSQL, 1) // Busca ID 1
-	err = row.Scan(&nomeItemA)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			log.Println("QueryRowContext: Nenhum registro encontrado (ErrNoRows).")
-		} else {
-			log.Printf("⚠️ Falha no QueryRowContext/Scan: %v", err)
-		}
-	} else {
-		fmt.Printf("✅ QueryRowContext bem-sucedido. Nome do Item 1: %s\n", nomeItemA)
-	}
-
-	// --- Exemplo 5: Transação (BeginTx) ---
-	fmt.Println("Executando Transação...")
-	tx, err := dataSource.BeginTx(ctx, nil) // Inicia transação com opções padrão
-	if err != nil {
-		log.Fatalf("Falha ao iniciar transação (BeginTx): %v", err)
-	}
-
-	// Defer Rollback para garantir que seja chamado em caso de erro/panic
-	txFinalizado := false // Flag para controlar o defer
-	defer func() {
-		if !txFinalizado && tx != nil { // Só faz rollback se não foi commitado/revertido explicitamente
-			fmt.Println("Defer: Tentando Rollback da transação não finalizada...")
-			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-				log.Printf("⚠️ Erro no Rollback do defer: %v", rbErr)
-			}
-		}
-	}()
-
-	// Operações dentro da transação
-	updateSQL := `UPDATE exemplo_typegorm SET valor = valor + 1 WHERE id = $1;` // PG syntax
-	// updateSQL := `UPDATE exemplo_typegorm SET valor = valor + 1 WHERE id = ?;` // MySQL/SQLite syntax
-	_, err = tx.ExecContext(ctx, updateSQL, 1) // Adiciona 1 ao valor do Item A
-	if err != nil {
-		log.Printf("Erro na transação (UPDATE): %v. Revertendo...", err)
-		tx.Rollback() // Reverte explicitamente
-		txFinalizado = true
-		return // Aborta a função main neste exemplo simples
-	}
-
-	// Se tudo deu certo, faz commit
-	fmt.Println("Commitando transação...")
-	if err = tx.Commit(); err != nil {
-		txFinalizado = true // Mesmo falhando no commit, a tx está "finalizada"
-		log.Fatalf("Falha ao commitar transação: %v", err)
-	}
-	txFinalizado = true // Marca como finalizada com sucesso
-	fmt.Println("✅ Transação commitada com sucesso!")
-
-
-	fmt.Println("🎉 Exemplo TypeGorm finalizado.")
-}
-
-```
+8.  **Funcionalidades Avançadas:** Caching, Listeners, etc.
 
 ## 💾 Bancos de Dados Suportados
 Atualmente, o TypeGorm suporta os seguintes bancos de dados, com drivers específicos para cada um. A tabela abaixo resume o status de implementação de cada driver:
