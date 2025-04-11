@@ -206,7 +206,7 @@ func (s *SQLServerDataSource) GetDriverType() typegorm.DriverType { return SQLSe
 func (s *SQLServerDataSource) GetDB() (*sql.DB, error) { return s.getDBInstance() }
 
 // GetNativeConnection implementa typegorm.DataSource.GetNativeConnection.
-func (s *SQLServerDataSource) GetNativeConnection() (interface{}, error) { return s.getDBInstance() }
+func (s *SQLServerDataSource) GetNativeConnection() (any, error) { return s.getDBInstance() }
 
 // --- Implementação Métodos Query/Tx/Prepare (Delegação) ---
 func (s *SQLServerDataSource) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {

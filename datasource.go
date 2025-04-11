@@ -26,7 +26,7 @@ const (
 
 // Config é uma interface vazia (marcador) para representar structs de configuração
 // específicas de cada driver.
-type Config interface{}
+type Config any
 
 // DriverTyper é implementada por structs de configuração para declarar
 // para qual driver de banco de dados elas se destinam.
@@ -45,8 +45,8 @@ type DataSource interface {
 	GetDriverType() DriverType      // Retorna o tipo do driver desta DataSource.
 
 	// Acesso Subjacente (Escape Hatches)
-	GetDB() (*sql.DB, error)                   // Retorna o objeto *sql.DB subjacente para bancos SQL.
-	GetNativeConnection() (interface{}, error) // Retorna a conexão/cliente nativo do driver subjacente.
+	GetDB() (*sql.DB, error)           // Retorna o objeto *sql.DB subjacente para bancos SQL.
+	GetNativeConnection() (any, error) // Retorna a conexão/cliente nativo do driver subjacente.
 
 	// Métodos de Execução de Query
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) // Executa comandos sem retorno de linhas (INSERT, UPDATE, DELETE).
