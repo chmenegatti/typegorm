@@ -14,12 +14,13 @@ type DriverType string
 
 // Constantes para os tipos de driver suportados.
 const (
-	MySQL    DriverType = "mysql"
-	Postgres DriverType = "postgres"
-	SQLite   DriverType = "sqlite"
-	Oracle   DriverType = "oracle"
-	Mongo    DriverType = "mongo"
-	Redis    DriverType = "redis"
+	MySQL     DriverType = "mysql"
+	Postgres  DriverType = "postgres"
+	SQLite    DriverType = "sqlite"
+	Oracle    DriverType = "oracle"
+	Mongo     DriverType = "mongo"
+	Redis     DriverType = "redis"
+	SQLServer DriverType = "sqlserver"
 	// Adicionar outros tipos conforme necessário
 )
 
