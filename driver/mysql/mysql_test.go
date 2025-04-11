@@ -28,12 +28,12 @@ func getTestDataSource(t *testing.T) typegorm.DataSource {
 
 	mysqlPortStr := os.Getenv("TEST_MYSQL_PORT")
 	if mysqlPortStr == "" {
-		mysqlPortStr = "3306"
+		mysqlPortStr = "3307"
 	}
 
 	mysqlUser := os.Getenv("TEST_MYSQL_USER")
 	if mysqlUser == "" {
-		mysqlUser = "admin"
+		mysqlUser = "root"
 	} // Usuário comum em dev
 
 	mysqlPassword := os.Getenv("TEST_MYSQL_PASSWORD")
@@ -44,7 +44,7 @@ func getTestDataSource(t *testing.T) typegorm.DataSource {
 
 	mysqlDbName := os.Getenv("TEST_MYSQL_DBNAME")
 	if mysqlDbName == "" {
-		mysqlDbName = "nemesis"
+		mysqlDbName = "testdb"
 	}
 
 	// Permite pular testes

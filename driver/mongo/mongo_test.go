@@ -42,7 +42,7 @@ func getTestDocumentStore(t *testing.T) typegorm.DocumentStore {
 
 	dbName := os.Getenv("TEST_MONGO_DBNAME")
 	if dbName == "" {
-		dbName = "typegorm_testdb"
+		dbName = "testdb"
 	}
 
 	// --- Lê Credenciais do Ambiente ---

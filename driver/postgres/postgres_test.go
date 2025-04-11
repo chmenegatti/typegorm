@@ -47,13 +47,13 @@ func getTestDataSource(t *testing.T) typegorm.DataSource {
 
 	pgDbName := os.Getenv("TEST_PG_DBNAME")
 	if pgDbName == "" {
-		pgDbName = "pg_test"
+		pgDbName = "testdb"
 	} // Nome comum de DB de teste
 
 	// Permite pular testes de integração se não explicitamente habilitados
-	if os.Getenv("RUN_POSTGRES_TESTS") != "true" {
-		t.Skip("Pulando testes de integração PostgreSQL: RUN_POSTGRES_TESTS não definida como 'true'")
-	}
+	// if os.Getenv("RUN_POSTGRES_TESTS") != "true" {
+	// 	t.Skip("Pulando testes de integração PostgreSQL: RUN_POSTGRES_TESTS não definida como 'true'")
+	// }
 
 	pgPort, err := strconv.Atoi(pgPortStr)
 	if err != nil {
