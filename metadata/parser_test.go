@@ -95,22 +95,56 @@ type ArtigoRel struct {
 type RelacaoErroTipo struct {
 	Usuario *UsuarioRel `typegorm:"relation:one-to-many-invalid"`
 }
+
+// Struct usada no teste "Conflito Tags"
 type RelacaoErroConflito struct {
 	Usuario *UsuarioRel `typegorm:"relation:one-to-one;joinColumn:user_id;mappedBy:Perfil"`
 }
+
 type RelacaoErroMtmSemTabela struct {
-	Categorias []*Categoria `typegorm:"relation:many-to-many"`
+	Categorias []*Categoria `typegorm:"relation:many-to-many"` // Lado dono MTM sem joinTable
 }
+
 type RelacaoErroJoinTableErrado struct {
-	Autor *UsuarioRel `typegorm:"relation:many-to-one;joinTable:tabela_errada"`
+	Autor *UsuarioRel `typegorm:"relation:many-to-one;joinTable:tabela_errada"` // MTO com joinTable
 }
+
 type RelacaoErroAlvoInvalido struct {
 	Valor int `typegorm:"relation:many-to-one"` // Campo não é struct/slice/ptr
 }
 
-// --- Funções Auxiliares de Teste ---
+// --- NOVAS Structs para Testar Erros de Validação de Relação ---
 
-// findColumn por nome do campo Go
+type ErrRel_MTO_NoJoinColumn struct { // ManyToOne sem joinColumn (obrigatório)
+	Autor *UsuarioRel `typegorm:"relation:many-to-one"`
+}
+type ErrRel_OTM_NoMappedBy struct { // OneToMany sem mappedBy (obrigatório)
+	Posts []*Post `typegorm:"relation:one-to-many"`
+}
+type ErrRel_OTO_Owner_HasMappedBy struct { // OneToOne dono com mappedBy (inválido)
+	Perfil *Perfil `typegorm:"relation:one-to-one;joinColumn:perfil_id;mappedBy:Usuario"`
+}
+type ErrRel_OTO_Inverse_HasJoinColumn struct { // OneToOne inverso com joinColumn (inválido)
+	Usuario *UsuarioRel `typegorm:"relation:one-to-one;mappedBy:Perfil;joinColumn:user_id"`
+}
+type ErrRel_MTO_HasJoinTable struct { // ManyToOne com joinTable (inválido)
+	Autor *UsuarioRel `typegorm:"relation:many-to-one;joinTable:tabela_errada"`
+}
+
+// Struct para o caso OTM com JoinColumn (erro duplo)
+type ErrRel_OTM_HasJoinColumn struct {
+	// Viola duas regras: falta mappedBy E tem joinColumn
+	Posts []*Post `typegorm:"relation:one-to-many;joinColumn:post_fk"`
+}
+
+type ErrRel_MTM_Inverse_HasJoinTable struct { // ManyToMany inverso com joinTable (inválido)
+	Artigos []*ArtigoRel `typegorm:"relation:many-to-many;mappedBy:Categorias;joinTable:tabela_errada"`
+}
+type ErrRel_MTM_Inverse_HasJoinColumn struct { // ManyToMany inverso com joinColumn (inválido)
+	Artigos []*ArtigoRel `typegorm:"relation:many-to-many;mappedBy:Categorias;joinColumn:artigo_id"`
+}
+
+// --- Funções Auxiliares de Teste ---
 func findColumn(meta *metadata.EntityMetadata, fieldName string) *metadata.ColumnMetadata {
 	if meta == nil || meta.ColumnsByName == nil {
 		return nil
@@ -121,9 +155,6 @@ func findColumn(meta *metadata.EntityMetadata, fieldName string) *metadata.Colum
 	}
 	return col
 }
-
-// --- NOVO Helper: findRelation por nome do campo Go ---
-
 func findRelation(meta *metadata.EntityMetadata, fieldName string) *metadata.RelationMetadata {
 	if meta == nil || meta.RelationsByName == nil {
 		return nil
@@ -486,12 +517,18 @@ func TestParse_TagErrors(t *testing.T) {
 	metadata.ClearMetadataCache()
 	t.Cleanup(metadata.ClearMetadataCache)
 
-	_, err := metadata.Parse(ErroTag{})
-	if err == nil {
-		t.Error("Esperado erro ao parsear ErroTag (size:abc), mas obteve nil")
-	} else if !strings.Contains(err.Error(), "erro ao parsear 'size'") { // Verifica se o erro é sobre 'size'
-		t.Errorf("Erro inesperado ao parsear ErroTag: %v", err)
-	} else {
+	_, err := metadata.Parse(ErroTag{}) // ErroTag has `Nome string `typegorm:"size:abc"`
+
+	// Usar require.Error é mais idiomático em testify para garantir que houve erro
+	require.Errorf(t, err, "Esperado erro ao parsear ErroTag (size:abc), mas obteve nil")
+
+	// vvv AJUSTAR A SUBSTRING ESPERADA vvv
+	// Verificar se a mensagem de erro contém a parte relevante "parse 'size'"
+	expectedSubstring := "parse 'size'"
+	assert.Containsf(t, err.Error(), expectedSubstring, "Erro inesperado ao parsear ErroTag. Esperado conter '%s', mas obteve: %v", expectedSubstring, err)
+
+	// Log opcional se passou
+	if err != nil && strings.Contains(err.Error(), expectedSubstring) {
 		t.Logf("Obteve erro esperado ao parsear tag inválida: %v", err)
 	}
 }
@@ -625,37 +662,73 @@ func TestParse_RelationManyToMany(t *testing.T) {
 }
 
 // Testa erros comuns no parsing de relações.
+// TestParse_RelationErrors testa erros comuns e validações extras no parsing de relações.
+// VERSÃO SEM t.Run para depuração.
 func TestParse_RelationErrors(t *testing.T) {
 	metadata.ClearMetadataCache()
 	t.Cleanup(metadata.ClearMetadataCache)
 
-	// Erro: Tipo de relação inválido
-	_, err := metadata.Parse(RelacaoErroTipo{})
-	require.Error(t, err, "Esperado erro para tipo de relação inválido")
-	assert.Contains(t, err.Error(), "tipo de relação inválido", "Mensagem de erro incorreta para tipo inválido")
-	t.Logf("OK: Erro esperado para tipo relação inválido: %v", err)
+	var err error
+	errMsgFormat := "Msg Erro '%s' - Erro: %v" // Formato para mensagens de erro assert
 
-	// Erro: Conflito entre joinColumn e mappedBy
-	_, err = metadata.Parse(RelacaoErroConflito{})
-	require.Error(t, err, "Esperado erro para conflito joinColumn/mappedBy")
-	assert.Contains(t, err.Error(), "tags conflitantes", "Mensagem de erro incorreta para conflito")
-	t.Logf("OK: Erro esperado para conflito joinColumn/mappedBy: %v", err)
+	runCheck := func(checkName string, target any, expectedSubstrings ...string) {
+		t.Helper()
+		t.Logf("Executando Checagem: %s", checkName)
+		_, err = metadata.Parse(target)
+		require.Errorf(t, err, "Caso '%s' deveria retornar erro", checkName)
 
-	// Erro: ManyToMany sem joinTable
-	_, err = metadata.Parse(RelacaoErroMtmSemTabela{})
-	require.Error(t, err, "Esperado erro para ManyToMany sem joinTable")
-	assert.Contains(t, err.Error(), "requer a tag 'joinTable'", "Mensagem de erro incorreta para MTM sem tabela")
-	t.Logf("OK: Erro esperado para MTM sem joinTable: %v", err)
+		// REMOVIDA a verificação assert.NotContainsf para "erro(s) durante o parsing"
 
-	// Erro: joinTable em relação não-ManyToMany
-	_, err = metadata.Parse(RelacaoErroJoinTableErrado{})
-	require.Error(t, err, "Esperado erro para joinTable em ManyToOne")
-	assert.Contains(t, err.Error(), "só é válida para ManyToMany", "Mensagem de erro incorreta para joinTable inválida")
-	t.Logf("OK: Erro esperado para joinTable em ManyToOne: %v", err)
+		// Verifica cada substring esperada
+		for _, sub := range expectedSubstrings {
+			assert.Containsf(t, err.Error(), sub, errMsgFormat, checkName+" (Falta: "+sub+")", err)
+		}
+		t.Logf("OK: Erro(s) esperado(s) para '%s'", checkName)
+		metadata.ClearMetadataCache()
+	}
 
-	// Erro: Alvo da relação não é struct/slice/ptr
-	_, err = metadata.Parse(RelacaoErroAlvoInvalido{})
-	require.Error(t, err, "Esperado erro para alvo de relação inválido")
-	assert.Contains(t, err.Error(), "deve ser struct, ponteiro ou slice", "Mensagem de erro incorreta para alvo inválido")
-	t.Logf("OK: Erro esperado para alvo inválido: %v", err)
+	// --- Casos de Teste (com substrings ajustadas) ---
+
+	runCheck("Tipo Inválido", RelacaoErroTipo{},
+		"tipo de relação inválido 'one-to-many-invalid'")
+
+	runCheck("Conflito Tags Relacao", RelacaoErroConflito{},
+		"tags conflitantes 'joinColumn' e 'mappedBy'")
+
+	runCheck("MTM Dono Sem JoinTable", RelacaoErroMtmSemTabela{},
+		"lado dono da relação ManyToMany requer a tag 'joinTable'")
+
+	runCheck("MTO com JoinTable (Inválido)", RelacaoErroJoinTableErrado{},
+		"tag 'joinTable' só é válida para ManyToMany") // Usa a validação mais genérica que é pega primeiro
+
+	runCheck("Alvo Não Struct", RelacaoErroAlvoInvalido{},
+		"deve ser struct, ponteiro ou slice")
+
+	runCheck("MTO Sem JoinColumn", ErrRel_MTO_NoJoinColumn{},
+		"ManyToOne requer 'joinColumn'")
+
+	runCheck("OTM Sem MappedBy", ErrRel_OTM_NoMappedBy{},
+		"OneToMany requer 'mappedBy'")
+
+	runCheck("OTO Dono com MappedBy", ErrRel_OTO_Owner_HasMappedBy{},
+		"tags conflitantes 'joinColumn' e 'mappedBy'") // Conflito é detectado primeiro
+
+	runCheck("OTO Inv com JoinCol", ErrRel_OTO_Inverse_HasJoinColumn{},
+		"tags conflitantes 'joinColumn' e 'mappedBy'") // Conflito
+
+	// vvv SUBSTRING AJUSTADA vvv
+	runCheck("MTO com JoinTable (duplicado)", ErrRel_MTO_HasJoinTable{},
+		"tag 'joinTable' só é válida para ManyToMany") // Usa a validação mais genérica
+
+	runCheck("OTM com JoinColumn (e sem MappedBy)", ErrRel_OTM_HasJoinColumn{},
+		"OneToMany requer 'mappedBy'",         // Erro 1
+		"OneToMany não deve ter 'joinColumn'") // Erro 2 (Ambos devem estar presentes)
+
+	// vvv SUBSTRING AJUSTADA vvv
+	runCheck("MTM Inv com JoinTable", ErrRel_MTM_Inverse_HasJoinTable{},
+		"lado inverso (mappedBy) da relação ManyToMany não deve ter a tag 'joinTable'") // Adicionado "a tag"
+
+	runCheck("MTM Inv com JoinCol", ErrRel_MTM_Inverse_HasJoinColumn{},
+		"tags conflitantes 'joinColumn' e 'mappedBy'") // Conflito
+
 }

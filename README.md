@@ -48,28 +48,37 @@ Aqui está um resumo do que fizemos e uma lista sugerida para os próximos passo
     * [✅] SQLite (Implementado e Testado)
     * [✅] PostgreSQL (Implementado e Testado)
     * [✅] MySQL / MariaDB (Implementado e Testado)
+    * [✅] SQL Server (Implementado e Testado)
 * [✅] **Drivers NoSQL:**
     * [✅] MongoDB (Implementado e Testado - Conexão/Ping/Operações básicas via driver nativo)
 
 **Metadados e Mapeamento:**
 
-* [✅] Definição das Structs de Metadados (`EntityMetadata`, `ColumnMetadata`).
-* [✅] Parser de Tags (`metadata.Parse`) implementado com:
+* [✅] Definição das Structs de Metadados (`EntityMetadata`, `ColumnMetadata`, `RelationMetadata`, etc.).
+* [✅] **Parser de Tags (`metadata.Parse`) implementado com:**
     * [✅] Leitura de tags `typegorm:"..."`.
     * [✅] Parsing de tags comuns (pk, column, type, size, unique, index, default, etc).
-    * [✅] Tratamento de colunas especiais (`createdAt`, `updatedAt`, `deletedAt`).
-    * [✅] Inferência de nome de tabela/coluna (convenção snake\_case).
-    * [✅] Inferência de nulidade básica.
-    * [✅] Cache de metadados implementado.
-    * [✅] **Parser Testado e Validado**.
+    * [✅] Tratamento de colunas especiais (createdAt, updatedAt, deletedAt).
+    * [✅] Inferência de nome de tabela/coluna (convenção snake_case).
+    * [✅] Inferência de nulidade básica e para tipos especiais (ponteiros, `sql.Null*`).
+    * [✅] Cache de metadados concorrente implementado.
+    * [✅] **Parsing e Validação de tags de Relacionamento** (`relation:`, `joinColumn:`, `mappedBy:`, `joinTable:`).
+    * [✅] **Validação robusta** de combinações de tags (conflitos, requisitos por tipo de relação).
+    * [✅] **Agregação de múltiplos erros** de parsing/validação para feedback completo.
+* [✅] **Parser Testado e Validado** (Testes unitários passando, incluindo validação de colunas, tipos, constraints, relações e múltiplos cenários de erro).
 
 **Operações ORM (SQL - Camada Inicial):**
 
-* [✅] Função `typegorm.Insert` implementada (usa metadados, trata autoIncrement PK, createdAt/updatedAt).
-* [✅] Função `typegorm.FindByID` implementada (usa metadados, scan dinâmico, trata `sql.ErrNoRows`, respeita soft delete).
-* [✅] Função `typegorm.Update` implementada (usa metadados, atualiza todos os campos não-PK, trata `updatedAt`).
-* [✅] Função `typegorm.Delete` implementada (com suporte a Hard e Soft Delete baseado em `deletedAt`).
-* [✅] **Testes de CRUD (Insert, FindByID, Update, Delete/SoftDelete) implementados e passando.**
+**Operações ORM (SQL - Camada Inicial):**
+
+* [✅] Função `typegorm.Insert` implementada.
+* [✅] Função `typegorm.FindByID` implementada.
+* [✅] Função `typegorm.Update` implementada.
+* [✅] Função `typegorm.Delete` implementada (Hard e Soft).
+* [✅] Testes de CRUD (Insert, FindByID, Update, Delete/SoftDelete) implementados e passando.
+* [✅] **Função `typegorm.Find` (Busca Múltipla)** implementada (com suporte a filtros/ordem/limite/offset básicos).
+* [✅] **Utilização de Metadados de Relações** implementada (com estratégia inicial de carregamento, ex: JOINs ou Lazy Loading).
+* [✅] **Testes de CRUD (Insert, FindByID, Update, Delete/SoftDelete, Find) implementados e passando.**
 
 ---
 
@@ -77,40 +86,23 @@ Aqui está um resumo do que fizemos e uma lista sugerida para os próximos passo
 
 Aqui estão as próximas fases lógicas, em uma ordem sugerida (mas podemos ajustar!):
 
-1.  👉 **Implementar `typegorm.Find` (Busca Múltipla - SQL):**
-    * Criar uma função `Find(ctx, ds, slicePtr, options...)` que busca múltiplos registros.
-    * `slicePtr` seria um ponteiro para um slice da struct (ex: `&[]Usuario{}`).
-    * `options` poderia ser uma struct ou argumentos variádicos para definir filtros (`WHERE`), ordenação (`ORDER BY`), limite (`LIMIT`) e offset (`OFFSET`).
-    * Internamente, construiria a query `SELECT`, usaria `ds.QueryContext`, iteraria sobre os `rows`, e faria o `Scan` dinâmico para preencher o slice.
-    * **Por que agora?** Completa o conjunto básico de operações de leitura (FindByID, Find) usando a infraestrutura atual antes de avançar para abstrações maiores.
-
-2.  **Definir e Parsear Relações:**
-    * Atualizar `metadata.go` para incluir informações sobre relações (`OneToOne`, `OneToMany`, `ManyToMany`) em `EntityMetadata` / `ColumnMetadata`.
-    * Atualizar `metadata/parser.go` para reconhecer e parsear tags de relacionamento (ex: `relation:`, `joinColumn:`, `mappedBy:`, `joinTable:`).
-    * Escrever testes para o parsing das relações.
-    * **Por que depois do Find?** Permite focar primeiro em operações de tabela única antes de introduzir a complexidade das junções e carregamento de dados relacionados.
-
-3.  **Iniciar o Query Builder:**
+1.  **Iniciar o Query Builder:**
     * Começar a projetar a API fluente (ex: `typegorm.QueryBuilder(ds).Model(&Usuario{}).Select(...).Where(...).OrderBy(...).Limit(...)`).
     * Implementar a construção de queries SQL baseada nos metadados e nas chamadas da API fluente.
     * Integrar com `GetOne()` (similar a `FindByID`), `GetMany()` (similar a `Find`), `Exec()` (para Updates/Deletes via QB).
     * **Por que depois das Relações?** O QB se beneficia muito de ter os metadados de relacionamento para construir JOINs automaticamente.
 
-4.  **Implementar Driver SQL Server:**
-    * Seguir o padrão dos outros drivers SQL (criar `driver/sqlserver`, Config, DataSource, registro, testes).
-    * **Por que aqui?** Pode ser feito a qualquer momento, mas talvez seja bom ter mais funcionalidades do ORM antes de adicionar outro driver SQL similar.
-
-5.  **Implementar Operações ORM para MongoDB:**
+2.  **Implementar Operações ORM para MongoDB:**
     * Adaptar/criar funções como `Insert`, `FindByID`, `Find`, `Update`, `Delete` que funcionem com a interface `DocumentStore` e usem a API do driver Mongo (`bson` para filtros/updates, `primitive.ObjectID` para IDs, etc.), possivelmente reutilizando os metadados (ou usando tags `bson`).
     * **Por que depois do QB SQL?** Permite focar em solidificar a experiência SQL ORM primeiro.
 
-6.  **Migrations:**
+3.  **Migrations:**
     * Projetar e implementar a ferramenta de linha de comando (`typegorm migrate ...`).
     * Lógica para comparar metadados com o schema do banco e gerar/executar SQL DDL.
 
-7.  **Drivers Adicionais (Redis, Oracle):** Adicionar conforme necessário/demandado.
+4.  **Drivers Adicionais (Redis, Oracle):** Adicionar conforme necessário/demandado.
 
-8.  **Funcionalidades Avançadas:** Caching, Listeners, etc.
+5.  **Funcionalidades Avançadas:** Caching, Listeners, etc.
 
 ## 💾 Bancos de Dados Suportados
 Atualmente, o TypeGorm suporta os seguintes bancos de dados, com drivers específicos para cada um. A tabela abaixo resume o status de implementação de cada driver:

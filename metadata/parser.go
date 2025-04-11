@@ -2,6 +2,7 @@
 package metadata
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -23,87 +24,70 @@ var (
 // Retorna erro se o input for inválido ou se houver erro irrecuperável no parsing das tags.
 // É seguro para uso concorrente.
 func Parse(target any) (*EntityMetadata, error) {
-	// Validação inicial da entrada
 	if target == nil {
 		return nil, fmt.Errorf("metadata.Parse: target (alvo) não pode ser nil")
 	}
 
-	// Obtém o reflect.Type base da struct, desreferenciando ponteiros se necessário.
 	structType := reflect.TypeOf(target)
-	isPointer := false // Guarda se o input original era um ponteiro
+	isPointer := false
 	if structType.Kind() == reflect.Ptr {
-		structType = structType.Elem() // Pega o tipo da struct apontada
+		structType = structType.Elem()
 		isPointer = true
 	}
 
-	// Garante que o tipo base é realmente uma struct.
 	if structType.Kind() != reflect.Struct {
-		originalKind := reflect.TypeOf(target).Kind() // Pega o Kind original para a msg de erro
+		originalKind := reflect.TypeOf(target).Kind()
 		return nil, fmt.Errorf("metadata.Parse: target deve ser uma struct ou ponteiro para struct, mas obteve %s", originalKind)
 	}
 
-	// --- 1. Verifica o Cache (Leitura Otimizada) ---
-	// Tenta ler do cache usando um Read Lock, permitindo leituras simultâneas.
+	// --- 1. Verifica o Cache (sem alterações) ---
 	cacheMutex.RLock()
 	meta, found := metadataCache[structType]
-	cacheMutex.RUnlock() // Libera o Read Lock o mais rápido possível.
+	cacheMutex.RUnlock()
 	if found {
-		// Se encontrou no cache, retorna o resultado cacheado imediatamente.
 		fmt.Printf("[LOG-Metadata][Cache] HIT para o tipo: %s\n", structType.Name())
 		return meta, nil
 	}
 
-	// --- 2. Cache Miss - Prepara para Parsing e Escrita no Cache ---
-	// Adquire um Write Lock. Só uma goroutine pode fazer o parsing de um tipo
-	// desconhecido por vez, garantindo a segurança do cache.
+	// --- 2. Cache Miss - Prepara (sem alterações) ---
 	cacheMutex.Lock()
-	// Defer garante que o Write Lock será liberado ao final da função,
-	// independentemente de como ela sair (sucesso, erro, panic).
 	defer cacheMutex.Unlock()
 
-	// --- 3. Double-Check no Cache (Verificação Dupla Essencial) ---
-	// Verifica o cache NOVAMENTE após obter o Write Lock. É possível que outra
-	// goroutine tenha terminado o parsing e preenchido o cache enquanto esta
-	// goroutine esperava pelo Write Lock. Isso evita trabalho duplicado.
+	// --- 3. Double-Check (sem alterações) ---
 	meta, found = metadataCache[structType]
 	if found {
-		// Se encontrou na segunda verificação, libera o Write Lock (via defer) e retorna.
 		fmt.Printf("[LOG-Metadata][Cache] HIT (double-check) para o tipo: %s\n", structType.Name())
 		return meta, nil
 	}
 
-	// --- 4. Cache Miss Real - Executa o Parsing Detalhado ---
+	// --- 4. Cache Miss Real - Parsing ---
 	fmt.Printf("[LOG-Metadata][Cache] MISS. Iniciando parsing para o tipo: %s (Ponteiro original: %v)\n", structType.Name(), isPointer)
 
-	// Inicializa a estrutura principal que armazenará os metadados da entidade.
 	entityMeta := &EntityMetadata{
-		Name:            structType.Name(),                        // Nome da struct Go.
-		Type:            structType,                               // Tipo refletido da struct.
-		TableName:       strcase.ToSnake(structType.Name()) + "s", // Nome da tabela inferido (convenção snake_case + 's').
-		Columns:         make([]*ColumnMetadata, 0),               // Slice para colunas mapeadas.
-		ColumnsByName:   make(map[string]*ColumnMetadata),         // Mapa para acesso rápido por nome de campo Go.
-		ColumnsByDBName: make(map[string]*ColumnMetadata),         // Mapa para acesso rápido por nome de coluna DB.
-		Relations:       make([]*RelationMetadata, 0),             // Slice para relações mapeadas.
-		RelationsByName: make(map[string]*RelationMetadata),       // Mapa para acesso rápido por nome de campo Go da relação.
+		Name:            structType.Name(),
+		Type:            structType,
+		TableName:       strcase.ToSnake(structType.Name()) + "s",
+		Columns:         make([]*ColumnMetadata, 0),
+		ColumnsByName:   make(map[string]*ColumnMetadata),
+		ColumnsByDBName: make(map[string]*ColumnMetadata),
+		Relations:       make([]*RelationMetadata, 0),
+		RelationsByName: make(map[string]*RelationMetadata),
 	}
 	fmt.Printf("[LOG-Metadata] Nome da tabela inferido: %s\n", entityMeta.TableName)
 
-	var firstParseError error // Guarda o primeiro erro encontrado durante o parsing das tags.
+	// vvv MUDANÇA 1: Troca firstParseError por slice vvv
+	var allParseErrors []error
 
 	// Itera sobre todos os campos definidos na struct Go.
-	for i := 0; i < structType.NumField(); i++ {
-		field := structType.Field(i) // Obtém informações do campo (nome, tipo, tag, etc.)
+	for i := range structType.NumField() {
+		field := structType.Field(i)
 
-		// Pula campos não exportados (privados), que começam com letra minúscula.
 		if !field.IsExported() {
 			fmt.Printf("[LOG-Metadata] Pulando campo não exportado: %s\n", field.Name)
 			continue
 		}
 
-		// Obtém o valor da tag "typegorm".
 		tagValue := field.Tag.Get("typegorm")
-
-		// Pula campos explicitamente marcados para serem ignorados com `typegorm:"-"`.
 		if tagValue == "-" {
 			fmt.Printf("[LOG-Metadata] Pulando campo ignorado (tag '-'): %s\n", field.Name)
 			continue
@@ -111,98 +95,86 @@ func Parse(target any) (*EntityMetadata, error) {
 
 		fmt.Printf("[LOG-Metadata] Processando Campo: %s (Tipo Go: %s, Tag: '%s')\n", field.Name, field.Type, tagValue)
 
-		// Variáveis temporárias para armazenar dados parseados para este campo.
-		isRelationField := false // Assume inicialmente que não é uma relação.
-		// Preenche dados básicos da relação (será usada se 'relation:' for encontrada).
+		isRelationField := false
 		relationData := RelationMetadata{Entity: entityMeta, FieldName: field.Name, FieldType: field.Type}
-		// Preenche dados básicos da coluna (será usada se não for relação ou se tiver tags de coluna).
 		columnData := ColumnMetadata{Entity: entityMeta, FieldName: field.Name, FieldType: field.Type, FieldIndex: i, GoType: field.Type.String(), ColumnName: strcase.ToSnake(field.Name), IsNullable: isTypeNullable(field.Type)}
 
-		// --- Parsing das Opções da Tag (separadas por ';') ---
 		options := strings.Split(tagValue, ";")
-		definedTags := make(map[string]string) // Mapa para detectar tags duplicadas.
+		definedTags := make(map[string]string)
 
 		for _, opt := range options {
 			opt = strings.TrimSpace(opt)
 			if opt == "" {
 				continue
-			} // Ignora opções vazias (ex: "pk;;autoIncrement")
-
-			// Separa chave:valor (se houver valor após ':')
-			var key, value string
-			parts := strings.SplitN(opt, ":", 2)
-			key = strings.ToLower(strings.TrimSpace(parts[0])) // Chave em minúsculas para case-insensitivity
-			if len(parts) == 2 {
-				value = strings.TrimSpace(parts[1]) // Valor como string
 			}
 
-			// Verifica e marca tags duplicadas para evitar comportamento indefinido.
+			var key, value string
+			parts := strings.SplitN(opt, ":", 2)
+			key = strings.ToLower(strings.TrimSpace(parts[0]))
+			if len(parts) == 2 {
+				value = strings.TrimSpace(parts[1])
+			}
+
 			if _, exists := definedTags[key]; exists && key != "" {
 				parseErr := fmt.Errorf("tag duplicada '%s' no campo %s.%s", key, entityMeta.Name, field.Name)
-				if firstParseError == nil {
-					firstParseError = parseErr
-				} // Guarda o primeiro erro
+				// vvv MUDANÇA 2: Acumula erro vvv
+				allParseErrors = append(allParseErrors, parseErr)
 				fmt.Printf("[WARN-Metadata] %v\n", parseErr)
-				continue // Pula processamento desta tag duplicada
+				continue // Pula processamento desta tag duplicada (OK manter)
 			}
 			if key != "" {
 				definedTags[key] = value
-			} // Marca a tag como vista
+			}
 
-			// Processa as chaves conhecidas pelo TypeGorm.
 			switch key {
-			// --- Tags Comuns de Coluna ---
 			case "column":
-				columnData.ColumnName = value // Nome da coluna no banco (ex: "nome_completo").
+				columnData.ColumnName = value
 			case "type":
-				columnData.DBType = value // Tipo explícito da coluna no DB (ex: "VARCHAR(150)").
-			case "size": // Tamanho (para VARCHAR, etc.).
+				columnData.DBType = value
+			case "size":
 				_, err := fmt.Sscan(value, &columnData.Size)
 				if err != nil {
 					parseErr := fmt.Errorf("parse 'size' (%s) %s.%s: %w", value, entityMeta.Name, field.Name, err)
-					if firstParseError == nil {
-						firstParseError = parseErr
-					}
+					// vvv MUDANÇA 3: Acumula erro vvv
+					allParseErrors = append(allParseErrors, parseErr)
 					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
 				}
-			case "precision": // Precisão (para DECIMAL/NUMERIC).
+			case "precision":
 				_, err := fmt.Sscan(value, &columnData.Precision)
 				if err != nil {
 					parseErr := fmt.Errorf("parse 'precision' (%s) %s.%s: %w", value, entityMeta.Name, field.Name, err)
-					if firstParseError == nil {
-						firstParseError = parseErr
-					}
+					// vvv MUDANÇA 4: Acumula erro vvv
+					allParseErrors = append(allParseErrors, parseErr)
 					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
 				}
-			case "scale": // Escala (para DECIMAL/NUMERIC).
+			case "scale":
 				_, err := fmt.Sscan(value, &columnData.Scale)
 				if err != nil {
 					parseErr := fmt.Errorf("parse 'scale' (%s) %s.%s: %w", value, entityMeta.Name, field.Name, err)
-					if firstParseError == nil {
-						firstParseError = parseErr
-					}
+					// vvv MUDANÇA 5: Acumula erro vvv
+					allParseErrors = append(allParseErrors, parseErr)
 					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
 				}
 			case "primarykey", "pk":
 				columnData.IsPrimaryKey = true
-				columnData.IsNullable = false // Marca como PK, PKs não podem ser nulas.
+				columnData.IsNullable = false
 			case "autoincrement", "auto_increment", "serial":
-				columnData.IsAutoIncrement = true // Marca como auto-incremento do DB.
+				columnData.IsAutoIncrement = true
 			case "notnull", "not_null":
-				columnData.IsNullable = false // Define como NOT NULL.
+				columnData.IsNullable = false
 			case "nullable":
-				columnData.IsNullable = true // Define explicitamente como NULLable.
+				columnData.IsNullable = true
 			case "unique":
-				columnData.IsUnique = true // Adiciona constraint UNIQUE simples.
+				columnData.IsUnique = true
 			case "default":
-				columnData.DefaultValue = value // Define valor DEFAULT (como string).
-			case "index": // Cria índice simples.
+				columnData.DefaultValue = value
+			case "index":
 				if value != "" {
 					columnData.IndexName = value
 				} else {
 					columnData.IndexName = fmt.Sprintf("idx_%s_%s", entityMeta.TableName, columnData.ColumnName)
 				}
-			case "uniqueindex": // Cria índice único.
+			case "uniqueindex":
 				columnData.IsUnique = true
 				if value != "" {
 					columnData.UniqueIndexName = value
@@ -210,132 +182,202 @@ func Parse(target any) (*EntityMetadata, error) {
 					columnData.UniqueIndexName = fmt.Sprintf("uidx_%s_%s", entityMeta.TableName, columnData.ColumnName)
 				}
 			case "createdat", "created_at":
-				columnData.IsCreatedAt = true // Timestamp de criação automático.
+				columnData.IsCreatedAt = true
 			case "updatedat", "updated_at":
-				columnData.IsUpdatedAt = true // Timestamp de atualização automático.
+				columnData.IsUpdatedAt = true
 			case "deletedat", "deleted_at":
 				columnData.IsDeletedAt = true
-				columnData.IsNullable = true // Timestamp para soft delete (deve ser nullable).
+				columnData.IsNullable = true
 
-			// --- Tags de Relação ---
 			case "relation":
-				isRelationField = true                          // Marca que este campo Go representa uma relação.
-				relationData.RelationType = RelationType(value) // Armazena o tipo (one-to-one, etc.).
-				// Validação básica do tipo de relação fornecido.
+				isRelationField = true
+				relationData.RelationType = RelationType(value)
 				switch relationData.RelationType {
-				case OneToOne, OneToMany, ManyToOne, ManyToMany: // Tipos válidos
-				default: // Tipo inválido
+				case OneToOne, OneToMany, ManyToOne, ManyToMany:
+				default:
 					parseErr := fmt.Errorf("tipo de relação inválido '%s' no campo %s.%s", value, entityMeta.Name, field.Name)
-					if firstParseError == nil {
-						firstParseError = parseErr
-					}
+					// vvv MUDANÇA 6: Acumula erro vvv
+					allParseErrors = append(allParseErrors, parseErr)
 					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
-					isRelationField = false // Desmarca como relação se o tipo for inválido.
+					isRelationField = false // Desmarca para não processar como relação
 				}
-			case "joincolumn", "join_column": // Define a(s) coluna(s) de junção (FK).
+			case "joincolumn", "join_column":
 				if relationData.JoinColumns == nil {
 					relationData.JoinColumns = make([]*JoinColumnMetadata, 0, 1)
 				}
-				// Parsing simples: "fk_coluna" ou "fk_coluna:ref_coluna".
 				jcParts := strings.SplitN(value, ":", 2)
-				jc := JoinColumnMetadata{ColumnName: strings.TrimSpace(jcParts[0]), ReferencedColumnName: "id"} // Coluna referenciada padrão é "id".
+				jc := JoinColumnMetadata{ColumnName: strings.TrimSpace(jcParts[0]), ReferencedColumnName: "id"}
 				if len(jcParts) == 2 {
 					jc.ReferencedColumnName = strings.TrimSpace(jcParts[1])
-				} // Usa ref_coluna se fornecida.
-				if jc.ColumnName == "" { // Nome da FK não pode ser vazio.
+				}
+				if jc.ColumnName == "" {
 					parseErr := fmt.Errorf("nome da coluna JoinColumn vazio no campo %s.%s", entityMeta.Name, field.Name)
-					if firstParseError == nil {
-						firstParseError = parseErr
-					}
+					// vvv MUDANÇA 7: Acumula erro vvv
+					allParseErrors = append(allParseErrors, parseErr)
 					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
 				} else {
 					relationData.JoinColumns = append(relationData.JoinColumns, &jc)
 				}
-				relationData.IsOwningSide = true // joinColumn implica que este é o lado "dono" da FK (*ToOne ou ManyToMany).
-			case "mappedby", "mapped_by": // Define o lado inverso da relação.
-				relationData.MappedByFieldName = value // Nome do campo na entidade ALVO que mapeia de volta.
-				relationData.IsOwningSide = false      // mappedBy implica que este é o lado "não dono" (*ToMany ou OneToOne inverso).
-			case "jointable", "join_table": // Define a tabela de junção para ManyToMany.
+				relationData.IsOwningSide = true
+			case "mappedby", "mapped_by":
+				relationData.MappedByFieldName = value
+				relationData.IsOwningSide = false
+			case "jointable", "join_table":
 				relationData.JoinTableName = value
-				relationData.IsOwningSide = true // Convenção: quem define joinTable é o dono.
-				// TODO Futuro: Implementar parsing de tags 'joinColumns' e 'inverseJoinColumns' para colunas explícitas na tabela de junção.
+				relationData.IsOwningSide = true
+				// TODO Futuro: Implementar parsing de tags 'joinColumns' e 'inverseJoinColumns'
 
-			// Caso padrão para tags não reconhecidas.
 			default:
 				fmt.Printf("[WARN-Metadata] Tag desconhecida ou não implementada: '%s' no campo %s.%s\n", opt, entityMeta.Name, field.Name)
 			}
 		} // Fim do loop de opções da tag (;)
 
-		// --- Finaliza Processamento do Campo: Decide se é Coluna ou Relação ---
+		// --- Finaliza Processamento do Campo ---
 		if isRelationField {
-			// --- Processa como Relação ---
+			// --- Validações de conflito e requisitos ---
+			hasFatalRelationError := false // Flag para pular adição da relação
 
-			// --- Validações de conflito e requisitos para relações ---
-
-			// Conflito joinColumn vs mappedBy (igual)
 			if len(relationData.JoinColumns) > 0 && relationData.MappedByFieldName != "" {
 				parseErr := fmt.Errorf("tags conflitantes 'joinColumn' e 'mappedBy' no campo %s.%s", entityMeta.Name, field.Name)
-				if firstParseError == nil {
-					firstParseError = parseErr
-				}
+				// vvv MUDANÇA 8: Acumula erro vvv
+				allParseErrors = append(allParseErrors, parseErr)
 				fmt.Printf("[WARN-Metadata] %v\n", parseErr)
-				continue // Pula este campo inválido.
+				hasFatalRelationError = true // Marca para pular este campo inválido
 			}
-			// --- Validação ManyToMany (CORRIGIDA) ---
+
 			if relationData.RelationType == ManyToMany {
-				// Lado DONO (sem mappedBy): Precisa ter joinTable
 				if relationData.MappedByFieldName == "" && relationData.JoinTableName == "" {
 					parseErr := fmt.Errorf("lado dono da relação ManyToMany requer a tag 'joinTable' no campo %s.%s", entityMeta.Name, field.Name)
-					if firstParseError == nil {
-						firstParseError = parseErr
-					}
+					// vvv MUDANÇA 9: Acumula erro vvv
+					allParseErrors = append(allParseErrors, parseErr)
 					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
-					continue // Pula este campo inválido.
+					hasFatalRelationError = true
 				}
-				// Lado INVERSO (com mappedBy): NÃO deve ter joinTable
 				if relationData.MappedByFieldName != "" && relationData.JoinTableName != "" {
 					parseErr := fmt.Errorf("lado inverso (mappedBy) da relação ManyToMany não deve ter a tag 'joinTable' no campo %s.%s", entityMeta.Name, field.Name)
-					if firstParseError == nil {
-						firstParseError = parseErr
-					}
+					// vvv MUDANÇA 10: Acumula erro vvv
+					allParseErrors = append(allParseErrors, parseErr)
 					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
-					// Decide se pula ou só ignora a tag joinTable inválida? Pular é mais seguro.
-					continue
+					hasFatalRelationError = true
 				}
 			}
-			// --- Fim Validação ManyToMany ---
-			// Valida se joinTable só é usado com ManyToMany.
+
 			if relationData.RelationType != ManyToMany && relationData.JoinTableName != "" {
 				parseErr := fmt.Errorf("tag 'joinTable' só é válida para ManyToMany no campo %s.%s", entityMeta.Name, field.Name)
-				if firstParseError == nil {
-					firstParseError = parseErr
-				}
+				// vvv MUDANÇA 11: Acumula erro vvv
+				allParseErrors = append(allParseErrors, parseErr)
 				fmt.Printf("[WARN-Metadata] %v\n", parseErr)
-				continue
+				hasFatalRelationError = true
 			}
-			// TODO: Mais validações (ex: mappedBy só em *ToMany/OneToOne inverso, etc.)
 
-			// Determina o tipo da Entidade Alvo da Relação.
-			targetType := field.Type // Pega o tipo do campo (ex: []*Post, *Perfil, Perfil, []Autor)
-			// Desembrulha ponteiros e slices para encontrar o tipo base da struct.
+			// Determina tipo alvo (código original OK)
+			targetType := field.Type
 			if targetType.Kind() == reflect.Ptr || targetType.Kind() == reflect.Slice {
-				targetType = targetType.Elem()        // Pega o tipo do elemento (ex: *Post, Perfil, Autor)
-				if targetType.Kind() == reflect.Ptr { // Se ainda for ponteiro (slice de ponteiros)
-					targetType = targetType.Elem() // Pega o tipo final (ex: Post)
+				targetType = targetType.Elem()
+				if targetType.Kind() == reflect.Ptr {
+					targetType = targetType.Elem()
 				}
 			}
-			// Verifica se o tipo final é uma struct.
 			if targetType.Kind() != reflect.Struct {
 				parseErr := fmt.Errorf("campo de relação '%s' deve ser struct, ponteiro ou slice de struct/ponteiro, tipo final encontrado foi %s", field.Name, targetType.Kind())
-				if firstParseError == nil {
-					firstParseError = parseErr
-				}
+				// vvv MUDANÇA 12: Acumula erro vvv
+				allParseErrors = append(allParseErrors, parseErr)
 				fmt.Printf("[WARN-Metadata] %v\n", parseErr)
-				continue // Pula campo com tipo alvo inválido.
+				hasFatalRelationError = true // Pula se o tipo alvo não for struct
+			} else {
+				relationData.TargetEntityType = targetType
+				relationData.TargetEntityName = targetType.Name()
 			}
-			// Armazena o tipo e nome da struct alvo.
-			relationData.TargetEntityType = targetType
-			relationData.TargetEntityName = targetType.Name()
+
+			// --- Validações Finais da Relação (Combinação Tipo vs Tags) ---
+			// Só executa se não houve erro fatal ANTES desta seção
+			if !hasFatalRelationError {
+				isValidRelation := true // Assume válido até encontrar erro nesta seção
+				switch relationData.RelationType {
+				case OneToOne:
+					if relationData.IsOwningSide {
+						if len(relationData.JoinColumns) == 0 {
+							parseErr := fmt.Errorf("lado dono da relação OneToOne requer 'joinColumn' no campo %s.%s", entityMeta.Name, field.Name)
+							allParseErrors = append(allParseErrors, parseErr) // Acumula
+							fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+							isValidRelation = false
+						}
+						if relationData.MappedByFieldName != "" {
+							parseErr := fmt.Errorf("lado dono da relação OneToOne não deve ter 'mappedBy' no campo %s.%s", entityMeta.Name, field.Name)
+							allParseErrors = append(allParseErrors, parseErr) // Acumula
+							fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+							isValidRelation = false
+						}
+						// joinTable já validado antes
+					} else { // Lado inverso
+						if relationData.MappedByFieldName == "" {
+							parseErr := fmt.Errorf("lado inverso da relação OneToOne requer 'mappedBy' no campo %s.%s", entityMeta.Name, field.Name)
+							allParseErrors = append(allParseErrors, parseErr) // Acumula
+							fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+							isValidRelation = false
+						}
+						// joinColumn (conflito) já validado antes
+						// joinTable já validado antes
+					}
+				case ManyToOne:
+					if len(relationData.JoinColumns) == 0 {
+						parseErr := fmt.Errorf("relação ManyToOne requer 'joinColumn' no campo %s.%s", entityMeta.Name, field.Name)
+						allParseErrors = append(allParseErrors, parseErr) // Acumula
+						fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+						isValidRelation = false
+					}
+					if relationData.MappedByFieldName != "" {
+						parseErr := fmt.Errorf("relação ManyToOne não deve ter 'mappedBy' no campo %s.%s", entityMeta.Name, field.Name)
+						allParseErrors = append(allParseErrors, parseErr) // Acumula
+						fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+						isValidRelation = false
+					}
+					// joinTable já validado antes
+				case OneToMany:
+					if relationData.MappedByFieldName == "" {
+						parseErr := fmt.Errorf("relação OneToMany requer 'mappedBy' no campo %s.%s", entityMeta.Name, field.Name)
+						allParseErrors = append(allParseErrors, parseErr) // Acumula
+						fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+						isValidRelation = false
+					}
+					if len(relationData.JoinColumns) > 0 {
+						parseErr := fmt.Errorf("relação OneToMany não deve ter 'joinColumn' no campo %s.%s", entityMeta.Name, field.Name)
+						allParseErrors = append(allParseErrors, parseErr) // Acumula
+						fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+						isValidRelation = false
+					}
+					// joinTable já validado antes
+				case ManyToMany:
+					if relationData.IsOwningSide {
+						// joinTable e mappedBy já validados antes
+					} else { // Lado inverso
+						if relationData.MappedByFieldName == "" {
+							parseErr := fmt.Errorf("lado inverso da relação ManyToMany requer 'mappedBy' no campo %s.%s", entityMeta.Name, field.Name)
+							allParseErrors = append(allParseErrors, parseErr) // Acumula
+							fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+							isValidRelation = false
+						}
+						// joinTable e joinColumn já validados antes
+						if len(relationData.InverseJoinColumns) > 0 { // Assuming InverseJoinColumns exists or add check for JoinColumns here too
+							parseErr := fmt.Errorf("lado inverso da relação ManyToMany não deve ter 'joinColumn'/'inverseJoinColumn' no campo %s.%s", entityMeta.Name, field.Name)
+							allParseErrors = append(allParseErrors, parseErr) // Acumula
+							fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+							isValidRelation = false
+						}
+					}
+				} // Fim do switch RelationType
+
+				// Se alguma validação DESTA seção falhou, marca como erro fatal para pular adição
+				if !isValidRelation {
+					hasFatalRelationError = true
+				}
+			} // Fim if !hasFatalRelationError (antes das validações finais)
+
+			// Se houve algum erro fatal (inicial ou final), pula a adição
+			if hasFatalRelationError {
+				fmt.Printf("[LOG-Metadata] Relação inválida '%s' pulada devido a erro(s) de validação.\n", field.Name)
+				continue // Pula para o próximo campo da struct (OK manter)
+			}
 
 			// Armazena os metadados da relação na entidade principal.
 			entityMeta.Relations = append(entityMeta.Relations, &relationData)
@@ -344,25 +386,92 @@ func Parse(target any) (*EntityMetadata, error) {
 
 		} else {
 			// --- Processa como Coluna Normal ---
-			// Considera como coluna se:
-			// 1. Alguma tag de coluna foi definida explicitamente (exceto 'relation')
-			// 2. Ou se NÃO for um campo de relação E for um tipo básico (não struct/slice/ptr/etc)
-			_, hasRelationTag := definedTags["relation"] // Verifica se a tag relation foi usada
-			isComplexGoType := field.Type.Kind() == reflect.Struct || field.Type.Kind() == reflect.Slice || field.Type.Kind() == reflect.Ptr || field.Type.Kind() == reflect.Map || field.Type.Kind() == reflect.Interface
+			// Decide se este campo deve ser mapeado como coluna.
 
-			// Se teve alguma tag E não for relação, OU se não teve tag NENHUMA e é um tipo simples -> Mapeia como coluna
-			shouldMapColumn := (len(definedTags) > 0 && !hasRelationTag) || (len(definedTags) == 0 && !isComplexGoType)
+			shouldMapColumn := false
+			hasAnyProcessedTag := len(definedTags) > 0 // Verifica se alguma tag foi lida para este campo
 
+			// Condição A: Mapeia se tiver alguma tag que NÃO seja 'relation'
+			_, hasRelationTag := definedTags["relation"]
+			if hasAnyProcessedTag && !hasRelationTag {
+				shouldMapColumn = true
+			} else if !hasAnyProcessedTag {
+				// Condição B: Nenhuma tag definida. Mapear por padrão?
+				kind := field.Type.Kind()
+				fieldType := field.Type // Guarda o tipo para verificações
+
+				switch kind {
+				// Tipos básicos sempre mapeiam por padrão
+				case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+					reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+					reflect.Float32, reflect.Float64,
+					reflect.String:
+					shouldMapColumn = true
+
+				case reflect.Struct:
+					// Mapear time.Time e sql.Null* por padrão
+					// Assumindo que você tem variáveis timeType, nullBoolType, etc. definidas globalmente ou carregadas.
+					// Se não, você precisará carregá-las: ex: timeType = reflect.TypeOf(time.Time{})
+					if fieldType == timeType ||
+						fieldType == nullBoolType || fieldType == nullFloat64Type ||
+						fieldType == nullInt64Type || fieldType == nullStringType ||
+						fieldType == nullTimeType {
+						shouldMapColumn = true
+					} else {
+						// Outras structs sem tags não são mapeadas por padrão (podem ser embutidas ou relações não marcadas)
+						fmt.Printf("[LOG-Metadata] Campo Struct '%s' (tipo %s) pulado (sem tags explícitas de coluna).\n", field.Name, field.Type)
+					}
+
+				case reflect.Slice:
+					// Mapear apenas []byte por padrão
+					if field.Type.Elem().Kind() == reflect.Uint8 { // É []byte?
+						shouldMapColumn = true
+					} else {
+						// Outros slices sem tags não são mapeados (podem ser relações *ToMany não marcadas)
+						fmt.Printf("[LOG-Metadata] Campo Slice '%s' (tipo %s) pulado (sem tags explícitas de coluna/relação).\n", field.Name, field.Type)
+					}
+
+				case reflect.Ptr:
+					// Mapear ponteiros para tipos que mapearíamos por padrão
+					elemType := field.Type.Elem() // Tipo para o qual aponta
+					elemKind := elemType.Kind()
+					switch elemKind {
+					case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+						reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+						reflect.Float32, reflect.Float64,
+						reflect.String:
+						shouldMapColumn = true // Ponteiro para tipo básico
+					case reflect.Struct:
+						// Mapear ponteiro para time.Time ou sql.Null*
+						if elemType == timeType ||
+							elemType == nullBoolType || elemType == nullFloat64Type ||
+							elemType == nullInt64Type || elemType == nullStringType ||
+							elemType == nullTimeType {
+							shouldMapColumn = true
+						} else {
+							// Pointers para outras structs não mapeados por padrão (podem ser relações *ToOne)
+							fmt.Printf("[LOG-Metadata] Campo Ptr para Struct '%s' (tipo %s) pulado (sem tags explícitas de coluna/relação).\n", field.Name, field.Type)
+						}
+					default:
+						// Ponteiros para slice, map, etc. não mapeados por padrão
+						fmt.Printf("[LOG-Metadata] Campo Ptr '%s' (tipo %s) pulado (aponta para tipo não mapeado por padrão).\n", field.Name, field.Type)
+					}
+				default:
+					// Map, Interface, Func, Chan, etc., não mapeados por padrão
+					fmt.Printf("[LOG-Metadata] Campo '%s' (tipo %s) pulado (tipo não mapeado por padrão).\n", field.Name, field.Type)
+				}
+			} // Fim Condição B (sem tags)
+
+			// Adiciona a coluna se decidido que deve ser mapeada
 			if shouldMapColumn {
-				// Adiciona metadados da coluna à entidade.
 				entityMeta.Columns = append(entityMeta.Columns, &columnData)
 				entityMeta.ColumnsByName[field.Name] = &columnData
-				// Verifica nome de coluna DB duplicado.
 				if _, exists := entityMeta.ColumnsByDBName[columnData.ColumnName]; exists {
-					fmt.Printf("[WARN-Metadata] Nome de coluna DB duplicado '%s' detectado para o campo %s.\n", columnData.ColumnName, field.Name)
+					fmt.Printf("[WARN-Metadata] Nome de coluna DB duplicado '%s' detectado (campos: %s, %s?).\n", columnData.ColumnName, entityMeta.ColumnsByDBName[columnData.ColumnName].FieldName, field.Name)
 				}
 				entityMeta.ColumnsByDBName[columnData.ColumnName] = &columnData
-				// Guarda referências para colunas especiais.
+
+				// Guarda referências (código original OK)
 				if columnData.IsPrimaryKey {
 					entityMeta.PrimaryKeyColumns = append(entityMeta.PrimaryKeyColumns, &columnData)
 				}
@@ -375,25 +484,28 @@ func Parse(target any) (*EntityMetadata, error) {
 				if columnData.IsDeletedAt {
 					entityMeta.DeletedAtColumn = &columnData
 				}
-				fmt.Printf("[LOG-Metadata] Coluna '%s' -> '%s' adicionada (Tags: %v).\n", field.Name, columnData.ColumnName, len(definedTags) > 0)
-			} else {
-				fmt.Printf("[LOG-Metadata] Campo '%s' pulado (provavelmente struct/slice/ptr sem tags de coluna/relação explícitas).\n", field.Name)
+				fmt.Printf("[LOG-Metadata] Coluna '%s' -> '%s' adicionada.\n", field.Name, columnData.ColumnName)
+			} else if !isRelationField {
+				// Log de campo pulado agora é feito dentro dos cases acima onde a decisão é tomada.
+				// Se chegou aqui e não mapeou, a razão já foi logada (ou é um tipo realmente não mapeável como Map, Func).
 			}
-		}
+		} // Fim do else (Processa como Coluna Normal)
 
 	} // --- Fim do loop de campos da struct ---
 
-	// Retorna erro se ocorreu algum durante o parsing das tags
-	if firstParseError != nil {
-		// O defer Unlock() vai liberar o Lock de escrita
-		return nil, fmt.Errorf("metadata.Parse: erro(s) durante o parsing das tags para %s: %w", structType.Name(), firstParseError)
+	// --- 5. Armazena no Cache (se não houver erros) ---
+	// vvv MUDANÇA 13: Verifica a slice e retorna erro agregado vvv
+	if len(allParseErrors) > 0 {
+		// Monta o erro agregado usando errors.Join (Go 1.20+)
+		finalError := errors.Join(allParseErrors...)
+		// Retorna um erro principal informando o número de problemas encontrados
+		return nil, fmt.Errorf("metadata.Parse: %d erro(s) durante o parsing das tags para %s: %w", len(allParseErrors), structType.Name(), finalError)
 	}
 
-	// --- 5. Armazena no Cache ---
+	// Só armazena no cache se não houve erros.
 	metadataCache[structType] = entityMeta
 	fmt.Printf("[LOG-Metadata] Metadados para %s armazenados no cache (%d colunas, %d relações).\n", structType.Name(), len(entityMeta.Columns), len(entityMeta.Relations))
 
-	// O defer Unlock() libera o Lock de escrita aqui
 	return entityMeta, nil
 }
 
