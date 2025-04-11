@@ -3,12 +3,15 @@ package metadata_test // Usar _test para testar como um pacote externo
 
 import (
 	"database/sql"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	// Importa o pacote a ser testado
 	"github.com/chmenegatti/typegorm/metadata"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // --- Structs de Exemplo para os Testes ---
@@ -55,6 +58,56 @@ type ErroTag struct {
 	Nome string `typegorm:"size:abc"` // 'abc' não é um número válido
 }
 
+type Perfil struct {
+	ID      uint `typegorm:"pk;autoIncrement"` // Simplificado para o teste do parser
+	Bio     string
+	Usuario *UsuarioRel `typegorm:"relation:one-to-one;mappedBy:Perfil"` // Lado inverso OTO
+}
+
+type Post struct {
+	ID      uint `typegorm:"pk;autoIncrement"`
+	Titulo  string
+	AutorID uint        // FK explícita (opcional)
+	Autor   *UsuarioRel `typegorm:"relation:many-to-one;joinColumn:autor_id"` // Lado ManyToOne (dono)
+}
+
+type Categoria struct {
+	ID      uint         `typegorm:"pk;autoIncrement"`
+	Nome    string       `typegorm:"unique"`
+	Artigos []*ArtigoRel `typegorm:"relation:many-to-many;mappedBy:Categorias"` // Lado inverso MTM
+}
+
+// Entidades que definem as relações
+type UsuarioRel struct {
+	ID     uint `typegorm:"pk;autoIncrement"`
+	Nome   string
+	Perfil *Perfil `typegorm:"relation:one-to-one;joinColumn:perfil_fk"` // Lado dono OTO
+	Posts  []*Post `typegorm:"relation:one-to-many;mappedBy:Autor"`      // Lado OneToMany (inverso)
+}
+
+type ArtigoRel struct {
+	ID         uint `typegorm:"pk;autoIncrement"`
+	Titulo     string
+	Categorias []*Categoria `typegorm:"relation:many-to-many;joinTable:artigo_categorias"` // Lado dono MTM
+}
+
+// Structs para testar erros de parsing de relações
+type RelacaoErroTipo struct {
+	Usuario *UsuarioRel `typegorm:"relation:one-to-many-invalid"`
+}
+type RelacaoErroConflito struct {
+	Usuario *UsuarioRel `typegorm:"relation:one-to-one;joinColumn:user_id;mappedBy:Perfil"`
+}
+type RelacaoErroMtmSemTabela struct {
+	Categorias []*Categoria `typegorm:"relation:many-to-many"`
+}
+type RelacaoErroJoinTableErrado struct {
+	Autor *UsuarioRel `typegorm:"relation:many-to-one;joinTable:tabela_errada"`
+}
+type RelacaoErroAlvoInvalido struct {
+	Valor int `typegorm:"relation:many-to-one"` // Campo não é struct/slice/ptr
+}
+
 // --- Funções Auxiliares de Teste ---
 
 // findColumn por nome do campo Go
@@ -67,6 +120,19 @@ func findColumn(meta *metadata.EntityMetadata, fieldName string) *metadata.Colum
 		return nil
 	}
 	return col
+}
+
+// --- NOVO Helper: findRelation por nome do campo Go ---
+
+func findRelation(meta *metadata.EntityMetadata, fieldName string) *metadata.RelationMetadata {
+	if meta == nil || meta.RelationsByName == nil {
+		return nil
+	}
+	rel, ok := meta.RelationsByName[fieldName]
+	if !ok {
+		return nil
+	}
+	return rel
 }
 
 // --- Testes ---
@@ -428,4 +494,168 @@ func TestParse_TagErrors(t *testing.T) {
 	} else {
 		t.Logf("Obteve erro esperado ao parsear tag inválida: %v", err)
 	}
+}
+
+// Testa o parsing de relações OneToOne (lado dono e lado inverso).
+func TestParse_RelationOneToOne(t *testing.T) {
+	metadata.ClearMetadataCache()
+	t.Cleanup(metadata.ClearMetadataCache)
+
+	// 1. Testa o lado dono (UsuarioRel -> Perfil)
+	metaUser, errUser := metadata.Parse(UsuarioRel{})
+	require.NoError(t, errUser, "Parse(UsuarioRel) não deveria retornar erro")
+	require.NotNil(t, metaUser, "Metadata de UsuarioRel não deveria ser nil")
+	// *** CORREÇÃO: Espera 2 relações (Perfil e Posts) ***
+	require.Len(t, metaUser.Relations, 2, "UsuarioRel deveria ter 2 relações (Perfil e Posts)")
+
+	// Busca a relação específica 'Perfil' para testar
+	relPerfil := findRelation(metaUser, "Perfil")
+	require.NotNil(t, relPerfil, "Relação 'Perfil' não encontrada em UsuarioRel")
+
+	// Asserções para a relação 'Perfil' (permanecem iguais)
+	assert.Equal(t, metadata.OneToOne, relPerfil.RelationType, "Tipo da relação Perfil incorreto")
+	assert.Equal(t, "Perfil", relPerfil.TargetEntityName, "Nome da entidade alvo incorreto")
+	assert.Equal(t, reflect.TypeOf(Perfil{}), relPerfil.TargetEntityType, "Tipo refletido da entidade alvo incorreto")
+	assert.True(t, relPerfil.IsOwningSide, "'Perfil' deveria ser o lado dono (tem joinColumn)")
+	assert.Empty(t, relPerfil.MappedByFieldName, "'Perfil' não deveria ter MappedByFieldName") // Usar Empty em vez de Nil para string
+	require.Len(t, relPerfil.JoinColumns, 1, "Esperado 1 JoinColumn para 'Perfil'")
+	assert.Equal(t, "perfil_fk", relPerfil.JoinColumns[0].ColumnName, "Nome da JoinColumn incorreto")
+	assert.Equal(t, "id", relPerfil.JoinColumns[0].ReferencedColumnName, "Nome da coluna referenciada default incorreto")
+
+	// 2. Testa o lado inverso (Perfil -> UsuarioRel)
+	metaPerfil, errPerfil := metadata.Parse(Perfil{})
+	require.NoError(t, errPerfil, "Parse(Perfil) não deveria retornar erro")
+	require.NotNil(t, metaPerfil, "Metadata de Perfil não deveria ser nil")
+	// Perfil só tem uma relação de volta para UsuarioRel
+	require.Len(t, metaPerfil.Relations, 1, "Perfil deveria ter 1 relação")
+
+	relUsuario := findRelation(metaPerfil, "Usuario")
+	require.NotNil(t, relUsuario, "Relação 'Usuario' não encontrada em Perfil")
+
+	// Asserções para a relação 'Usuario' (permanecem iguais)
+	assert.Equal(t, metadata.OneToOne, relUsuario.RelationType, "Tipo da relação Usuario incorreto")
+	assert.Equal(t, "UsuarioRel", relUsuario.TargetEntityName, "Nome da entidade alvo incorreto")
+	assert.Equal(t, reflect.TypeOf(UsuarioRel{}), relUsuario.TargetEntityType, "Tipo refletido da entidade alvo incorreto")
+	assert.False(t, relUsuario.IsOwningSide, "'Usuario' deveria ser o lado inverso (tem mappedBy)")
+	assert.Equal(t, "Perfil", relUsuario.MappedByFieldName, "'Usuario' deveria ter MappedByFieldName='Perfil'")
+	assert.Empty(t, relUsuario.JoinColumns, "'Usuario' não deveria ter JoinColumns")
+}
+
+// Testa o parsing de relações ManyToOne e OneToMany.
+func TestParse_RelationManyToOneOneToMany(t *testing.T) {
+	metadata.ClearMetadataCache()
+	t.Cleanup(metadata.ClearMetadataCache)
+
+	// 1. Testa o lado ManyToOne (Post -> UsuarioRel)
+	metaPost, errPost := metadata.Parse(Post{})
+	require.NoError(t, errPost)
+	require.NotNil(t, metaPost)
+	require.Len(t, metaPost.Relations, 1)
+
+	relAutor := findRelation(metaPost, "Autor")
+	require.NotNil(t, relAutor)
+
+	assert.Equal(t, metadata.ManyToOne, relAutor.RelationType)
+	assert.Equal(t, "UsuarioRel", relAutor.TargetEntityName)
+	assert.Equal(t, reflect.TypeOf(UsuarioRel{}), relAutor.TargetEntityType)
+	assert.True(t, relAutor.IsOwningSide)
+	assert.Empty(t, relAutor.MappedByFieldName)
+	require.Len(t, relAutor.JoinColumns, 1)
+	assert.Equal(t, "autor_id", relAutor.JoinColumns[0].ColumnName)
+	assert.Equal(t, "id", relAutor.JoinColumns[0].ReferencedColumnName) // Default
+
+	// 2. Testa o lado OneToMany (UsuarioRel -> Post)
+	metaUser, errUser := metadata.Parse(UsuarioRel{})
+	require.NoError(t, errUser)
+	require.NotNil(t, metaUser)
+	// UsuarioRel agora tem 2 relações: Perfil (OTO) e Posts (OTM)
+	require.Len(t, metaUser.Relations, 2)
+
+	relPosts := findRelation(metaUser, "Posts")
+	require.NotNil(t, relPosts)
+
+	assert.Equal(t, metadata.OneToMany, relPosts.RelationType)
+	assert.Equal(t, "Post", relPosts.TargetEntityName)
+	// Verifica se pegou o tipo 'Post' de dentro do slice '[]*Post'
+	assert.Equal(t, reflect.TypeOf(Post{}), relPosts.TargetEntityType)
+	assert.False(t, relPosts.IsOwningSide)
+	assert.Equal(t, "Autor", relPosts.MappedByFieldName)
+	assert.Empty(t, relPosts.JoinColumns)
+}
+
+// Testa o parsing de relações ManyToMany.
+func TestParse_RelationManyToMany(t *testing.T) {
+	metadata.ClearMetadataCache()
+	t.Cleanup(metadata.ClearMetadataCache)
+
+	// 1. Testa o lado dono (ArtigoRel -> Categoria, define JoinTable)
+	metaArtigo, errArtigo := metadata.Parse(ArtigoRel{})
+	require.NoError(t, errArtigo)
+	require.NotNil(t, metaArtigo)
+	require.Len(t, metaArtigo.Relations, 1)
+
+	relCategorias := findRelation(metaArtigo, "Categorias")
+	require.NotNil(t, relCategorias)
+
+	assert.Equal(t, metadata.ManyToMany, relCategorias.RelationType)
+	assert.Equal(t, "Categoria", relCategorias.TargetEntityName)
+	assert.Equal(t, reflect.TypeOf(Categoria{}), relCategorias.TargetEntityType) // Pega de []*Categoria
+	assert.True(t, relCategorias.IsOwningSide)                                   // Quem define JoinTable é o dono
+	assert.Equal(t, "artigo_categorias", relCategorias.JoinTableName)
+	assert.Empty(t, relCategorias.MappedByFieldName)
+	// TODO: Testar JoinColumns e InverseJoinColumns quando o parsing for implementado
+
+	// 2. Testa o lado inverso (Categoria -> ArtigoRel, usa mappedBy)
+	metaCategoria, errCategoria := metadata.Parse(Categoria{})
+	require.NoError(t, errCategoria)
+	require.NotNil(t, metaCategoria)
+	require.Len(t, metaCategoria.Relations, 1)
+
+	relArtigos := findRelation(metaCategoria, "Artigos")
+	require.NotNil(t, relArtigos)
+
+	assert.Equal(t, metadata.ManyToMany, relArtigos.RelationType)
+	assert.Equal(t, "ArtigoRel", relArtigos.TargetEntityName)
+	assert.Equal(t, reflect.TypeOf(ArtigoRel{}), relArtigos.TargetEntityType) // Pega de []*ArtigoRel
+	assert.False(t, relArtigos.IsOwningSide)                                  // mappedBy define como lado inverso
+	assert.Equal(t, "Categorias", relArtigos.MappedByFieldName)
+	assert.Empty(t, relArtigos.JoinTableName) // Lado inverso não define a tabela
+	assert.Empty(t, relArtigos.JoinColumns)
+	assert.Empty(t, relArtigos.InverseJoinColumns)
+}
+
+// Testa erros comuns no parsing de relações.
+func TestParse_RelationErrors(t *testing.T) {
+	metadata.ClearMetadataCache()
+	t.Cleanup(metadata.ClearMetadataCache)
+
+	// Erro: Tipo de relação inválido
+	_, err := metadata.Parse(RelacaoErroTipo{})
+	require.Error(t, err, "Esperado erro para tipo de relação inválido")
+	assert.Contains(t, err.Error(), "tipo de relação inválido", "Mensagem de erro incorreta para tipo inválido")
+	t.Logf("OK: Erro esperado para tipo relação inválido: %v", err)
+
+	// Erro: Conflito entre joinColumn e mappedBy
+	_, err = metadata.Parse(RelacaoErroConflito{})
+	require.Error(t, err, "Esperado erro para conflito joinColumn/mappedBy")
+	assert.Contains(t, err.Error(), "tags conflitantes", "Mensagem de erro incorreta para conflito")
+	t.Logf("OK: Erro esperado para conflito joinColumn/mappedBy: %v", err)
+
+	// Erro: ManyToMany sem joinTable
+	_, err = metadata.Parse(RelacaoErroMtmSemTabela{})
+	require.Error(t, err, "Esperado erro para ManyToMany sem joinTable")
+	assert.Contains(t, err.Error(), "requer a tag 'joinTable'", "Mensagem de erro incorreta para MTM sem tabela")
+	t.Logf("OK: Erro esperado para MTM sem joinTable: %v", err)
+
+	// Erro: joinTable em relação não-ManyToMany
+	_, err = metadata.Parse(RelacaoErroJoinTableErrado{})
+	require.Error(t, err, "Esperado erro para joinTable em ManyToOne")
+	assert.Contains(t, err.Error(), "só é válida para ManyToMany", "Mensagem de erro incorreta para joinTable inválida")
+	t.Logf("OK: Erro esperado para joinTable em ManyToOne: %v", err)
+
+	// Erro: Alvo da relação não é struct/slice/ptr
+	_, err = metadata.Parse(RelacaoErroAlvoInvalido{})
+	require.Error(t, err, "Esperado erro para alvo de relação inválido")
+	assert.Contains(t, err.Error(), "deve ser struct, ponteiro ou slice", "Mensagem de erro incorreta para alvo inválido")
+	t.Logf("OK: Erro esperado para alvo inválido: %v", err)
 }

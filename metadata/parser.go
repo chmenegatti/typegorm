@@ -270,24 +270,40 @@ func Parse(target any) (*EntityMetadata, error) {
 		if isRelationField {
 			// --- Processa como Relação ---
 
-			// Validações de conflito entre tags de relação.
+			// --- Validações de conflito e requisitos para relações ---
+
+			// Conflito joinColumn vs mappedBy (igual)
 			if len(relationData.JoinColumns) > 0 && relationData.MappedByFieldName != "" {
-				parseErr := fmt.Errorf("tags conflitantes 'joinColumn' e 'mappedBy' no campo de relação %s.%s", entityMeta.Name, field.Name)
+				parseErr := fmt.Errorf("tags conflitantes 'joinColumn' e 'mappedBy' no campo %s.%s", entityMeta.Name, field.Name)
 				if firstParseError == nil {
 					firstParseError = parseErr
 				}
 				fmt.Printf("[WARN-Metadata] %v\n", parseErr)
 				continue // Pula este campo inválido.
 			}
-			// Valida se ManyToMany tem joinTable.
-			if relationData.RelationType == ManyToMany && relationData.JoinTableName == "" {
-				parseErr := fmt.Errorf("relação ManyToMany requer a tag 'joinTable' no campo %s.%s", entityMeta.Name, field.Name)
-				if firstParseError == nil {
-					firstParseError = parseErr
+			// --- Validação ManyToMany (CORRIGIDA) ---
+			if relationData.RelationType == ManyToMany {
+				// Lado DONO (sem mappedBy): Precisa ter joinTable
+				if relationData.MappedByFieldName == "" && relationData.JoinTableName == "" {
+					parseErr := fmt.Errorf("lado dono da relação ManyToMany requer a tag 'joinTable' no campo %s.%s", entityMeta.Name, field.Name)
+					if firstParseError == nil {
+						firstParseError = parseErr
+					}
+					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+					continue // Pula este campo inválido.
 				}
-				fmt.Printf("[WARN-Metadata] %v\n", parseErr)
-				continue
+				// Lado INVERSO (com mappedBy): NÃO deve ter joinTable
+				if relationData.MappedByFieldName != "" && relationData.JoinTableName != "" {
+					parseErr := fmt.Errorf("lado inverso (mappedBy) da relação ManyToMany não deve ter a tag 'joinTable' no campo %s.%s", entityMeta.Name, field.Name)
+					if firstParseError == nil {
+						firstParseError = parseErr
+					}
+					fmt.Printf("[WARN-Metadata] %v\n", parseErr)
+					// Decide se pula ou só ignora a tag joinTable inválida? Pular é mais seguro.
+					continue
+				}
 			}
+			// --- Fim Validação ManyToMany ---
 			// Valida se joinTable só é usado com ManyToMany.
 			if relationData.RelationType != ManyToMany && relationData.JoinTableName != "" {
 				parseErr := fmt.Errorf("tag 'joinTable' só é válida para ManyToMany no campo %s.%s", entityMeta.Name, field.Name)
