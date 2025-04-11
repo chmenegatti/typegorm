@@ -120,7 +120,7 @@ SQLite	| mattn/go-sqlite3	| ✅ Implementado |
 PostgreSQL |	jackc/pgx/v5/stdlib	| ✅ Implementado |
 MySQL/MariaDB	| go-sql-driver/mysql |	✅ Implementado |
 SQL Server	| microsoft/go-mssqldb |	🔧 Planejado |
-MongoDB	| go.mongodb.org/mongo-driver |	🔧 Planejado |
+MongoDB	| go.mongodb.org/mongo-driver |	✅ Implementado |
 Redis |	go-redis/redis |	🔧 Planejado |
 Oracle |	godror/godror |	🔧 Planejado |
 
