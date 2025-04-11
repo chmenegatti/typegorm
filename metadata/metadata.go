@@ -7,6 +7,18 @@ import (
 	"time"
 )
 
+// --- Constantes e Tipos para Relações ---
+
+// RelationType define o tipo de relacionamento entre entidades.
+type RelationType string
+
+const (
+	OneToOne   RelationType = "one-to-one"
+	OneToMany  RelationType = "one-to-many"
+	ManyToOne  RelationType = "many-to-one"
+	ManyToMany RelationType = "many-to-many"
+)
+
 // EntityMetadata armazena metadados sobre uma entidade (struct Go mapeada).
 type EntityMetadata struct {
 	Name              string                     // Nome da struct Go (ex: "Usuario")
@@ -22,7 +34,9 @@ type EntityMetadata struct {
 	UpdatedAtColumn *ColumnMetadata
 	DeletedAtColumn *ColumnMetadata
 
-	// TODO: Informações sobre Índices, Relações, etc.
+	// --- NOVO: Armazena informações sobre as relações ---
+	Relations       []*RelationMetadata          // Lista de todas as relações definidas nesta entidade
+	RelationsByName map[string]*RelationMetadata // Mapa [NomeDoCampoGo] -> *RelationMetadata
 }
 
 // ColumnMetadata armazena metadados sobre um campo de struct mapeado para uma coluna.
@@ -53,6 +67,49 @@ type ColumnMetadata struct {
 	// TODO: Informações sobre Índices específicos da coluna, Relações
 	IndexName       string // Nome do índice simples nesta coluna (se houver)
 	UniqueIndexName string // Nome do índice único nesta coluna (se houver)
+}
+
+// RelationMetadata armazena metadados sobre um relacionamento entre duas entidades.
+type RelationMetadata struct {
+	Entity       *EntityMetadata // Entidade que define esta relação (onde o campo Go está)
+	FieldName    string          // Nome do campo Go que representa a relação (ex: "Posts", "Autor")
+	FieldType    reflect.Type    // Tipo do campo Go (ex: []*Post, *Perfil)
+	RelationType RelationType    // Tipo da relação (OneToOne, ManyToOne, etc.)
+
+	TargetEntityType reflect.Type // O reflect.Type da struct da entidade do OUTRO lado da relação (ex: Post, Perfil)
+	TargetEntityName string       // Nome da struct da entidade alvo
+
+	// Lado "Dono" vs "Inverso"
+	// O lado dono é geralmente onde a chave estrangeira (ToOne) ou a tabela de junção (ManyToMany) é definida.
+	IsOwningSide bool // Este lado gerencia a FK ou JoinTable? Determinado por joinColumn/joinTable vs mappedBy.
+
+	// --- Campos específicos por tipo de relação ---
+
+	// Para *ToOne (ManyToOne, OneToOne dono) E ManyToMany (lado dono)
+	// Descreve a(s) coluna(s) de junção (FK) na tabela DESTA entidade ou na TABELA DE JUNÇÃO.
+	JoinColumns []*JoinColumnMetadata
+
+	// Para *ToMany (OneToMany, OneToOne inverso)
+	// Nome do campo na entidade ALVO que mapeia de volta para ESTA entidade.
+	MappedByFieldName string
+
+	// Apenas para ManyToMany
+	JoinTableName string // Nome da tabela de junção intermediária.
+	// Descreve a(s) coluna(s) na tabela de junção que apontam para a entidade ALVO.
+	InverseJoinColumns []*JoinColumnMetadata
+
+	// TODO: Opções futuras como Cascade (delete, update), Fetch (lazy/eager)
+	// CascadeDelete bool
+	// CascadeUpdate bool
+	// FetchType string // "LAZY" ou "EAGER"
+}
+
+// JoinColumnMetadata descreve uma coluna de junção (geralmente uma chave estrangeira).
+type JoinColumnMetadata struct {
+	// Nome da coluna de chave estrangeira (nesta tabela ou na tabela de junção).
+	ColumnName string
+	// Nome da coluna na tabela ALVO que esta FK referencia (geralmente a PK da tabela alvo).
+	ReferencedColumnName string
 }
 
 // --- Tipos Go comuns para referência ---

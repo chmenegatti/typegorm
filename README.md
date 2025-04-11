@@ -119,7 +119,7 @@ Atualmente, o TypeGorm suporta os seguintes bancos de dados, com drivers especí
 SQLite	| mattn/go-sqlite3	| ✅ Implementado |
 PostgreSQL |	jackc/pgx/v5/stdlib	| ✅ Implementado |
 MySQL/MariaDB	| go-sql-driver/mysql |	✅ Implementado |
-SQL Server	| microsoft/go-mssqldb |	🔧 Planejado |
+SQL Server	| microsoft/go-mssqldb |	✅ Implementado |
 MongoDB	| go.mongodb.org/mongo-driver |	✅ Implementado |
 Redis |	go-redis/redis |	🔧 Planejado |
 Oracle |	godror/godror |	🔧 Planejado |
