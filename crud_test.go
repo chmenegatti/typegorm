@@ -14,6 +14,9 @@ import (
 
 	// Importa o pacote sendo testado
 	"github.com/chmenegatti/typegorm"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	// Importa config e driver específico (SQLite para teste fácil)
 
 	sqlite_driver "github.com/chmenegatti/typegorm/driver/sqlite"
@@ -103,6 +106,46 @@ func setupTestDB(t *testing.T) typegorm.DataSource {
 	})
 
 	return ds
+}
+
+func setupTestDBWithData(t *testing.T) (typegorm.DataSource, []*CrudTestModel) {
+	t.Helper()
+	ds := setupTestDB(t) // Reutiliza o setup básico
+	ctx := context.Background()
+
+	// Dados de Teste
+	email1 := "find.a@test.com"
+	email3 := "find.c@test.com"
+	modelos := []*CrudTestModel{
+		{Nome: "Charlie", Email: &email3, Status: 10}, // ID 1 (provável)
+		{Nome: "Alice", Status: 20},                   // ID 2 - Email NULL
+		{Nome: "Bob", Email: &email1, Status: 10},     // ID 3
+		{Nome: "David", Status: 30},                   // ID 4
+		{Nome: "Eve", Status: 10},                     // ID 5
+	}
+
+	// Insere os dados usando typegorm.Insert
+	insertedModels := make([]*CrudTestModel, len(modelos))
+	for i, m := range modelos {
+		err := typegorm.Insert(ctx, ds, m) // Passa o ponteiro
+		if err != nil {
+			// Se falhar aqui, o setup falhou, aborta o teste
+			ds.Close() // Tenta fechar o DS antes de falhar
+			t.Fatalf("Falha ao inserir dado de teste #%d (%s): %v", i+1, m.Nome, err)
+		}
+		// É importante pegar o modelo retornado pelo Insert se ele preencher o ID
+		// Como Insert não retorna o modelo modificado, e LastInsertId não funciona no SQL Server,
+		// precisamos buscar o ID separadamente se precisarmos dele com certeza,
+		// mas para os testes de Find, podemos confiar na ordem de inserção para IDs sequenciais (exceto PK manual).
+		// Vamos assumir IDs sequenciais para SQLite/PG/MySQL/SQLServer IDENTITY.
+		insertedModels[i] = m // Guarda o modelo (com ID potencialmente preenchido)
+		// Para garantir o ID no SQL Server, teríamos que buscar aqui.
+		// Vamos simplificar e assumir que os IDs serão 1, 2, 3, 4, 5 para os testes.
+		insertedModels[i].ID = uint(i + 1) // Define IDs manualmente para o teste
+		t.Logf("Dado de teste '%s' inserido/assumido com ID %d", m.Nome, m.ID)
+	}
+
+	return ds, insertedModels
 }
 
 // --- Teste para a Função Insert ---
@@ -652,4 +695,227 @@ func TestFindByID_IgnoresSoftDeleted(t *testing.T) {
 	} else {
 		t.Log("FindByID retornou sql.ErrNoRows esperado para registro soft-deletado.")
 	}
+}
+
+func TestFind_NoOptions(t *testing.T) {
+	ds, insertedModels := setupTestDBWithData(t)
+	ctx := context.Background()
+
+	var results []CrudTestModel // Slice de valores (não ponteiros)
+
+	t.Log("Chamando typegorm.Find sem opções...")
+	err := typegorm.Find(ctx, ds, &results, nil) // Passa ponteiro para o slice
+
+	require.NoError(t, err, "typegorm.Find não deveria retornar erro sem opções")
+	assert.Len(t, results, len(insertedModels), "Número de resultados diferente do esperado")
+	t.Logf("Find sem opções retornou %d registros.", len(results))
+	// Comparação mais profunda pode ser adicionada se necessário
+}
+
+// Testa Find com uma condição WHERE simples.
+func TestFind_WhereSimple(t *testing.T) {
+	ds, _ := setupTestDBWithData(t) // Ignora modelos inseridos, conhecemos os dados
+	ctx := context.Background()
+
+	var results []*CrudTestModel // Slice de ponteiros
+
+	opts := &typegorm.FindOptions{
+		Where: map[string]any{
+			// Busca por status=10. Placeholders dependem do driver!
+			// buildSelectQuery usará getPlaceholder internamente.
+			// A chave do mapa PRECISA incluir o placeholder.
+			"status = ?": 10, // Chave inclui placeholder genérico '?' que será adaptado
+		},
+	}
+
+	t.Logf("Chamando typegorm.Find com Where: %v", opts.Where)
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.NoError(t, err, "typegorm.Find com Where simples falhou")
+	require.Len(t, results, 3, "Esperado 3 registros com status=10")
+	t.Logf("Find com Where simples retornou %d registros.", len(results))
+
+	// Verifica se todos os resultados têm o status correto
+	for _, r := range results {
+		assert.Equal(t, 10, r.Status, "Registro retornado tem status incorreto")
+	}
+}
+
+// Testa Find com múltiplas condições WHERE (AND).
+func TestFind_WhereMultiple(t *testing.T) {
+	ds, _ := setupTestDBWithData(t)
+	ctx := context.Background()
+
+	var results []CrudTestModel
+
+	emailPattern := "find.%" // Padrão para email LIKE
+	status := 10
+	opts := &typegorm.FindOptions{
+		Where: map[string]any{
+			"status = ?":       status,
+			"email LIKE ?":     emailPattern, // Busca emails que começam com "find."
+			"nome_modelo != ?": "Eve",        // Exclui um dos nomes
+		},
+	}
+
+	t.Logf("Chamando typegorm.Find com Where múltiplo: %v", opts.Where)
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.NoError(t, err, "typegorm.Find com Where múltiplo falhou")
+	// Esperamos 2 resultados: Charlie (status 10, email find.c) e Bob (status 10, email find.a)
+	// Eve (status 10) é excluída pelo nome. Alice (status 20) e David (status 30) pelo status.
+	require.Len(t, results, 2, "Esperado 2 registros com status=10 e email LIKE 'find.%' e nome != Eve")
+	t.Logf("Find com Where múltiplo retornou %d registros.", len(results))
+
+	for _, r := range results {
+		assert.Equal(t, status, r.Status, "Status incorreto")
+		require.NotNil(t, r.Email, "Email não deveria ser nil")
+		assert.True(t, strings.HasPrefix(*r.Email, "find."), "Email não corresponde ao padrão LIKE")
+		assert.NotEqual(t, "Eve", r.Nome, "Nome não deveria ser Eve")
+	}
+}
+
+// Testa Find com ORDER BY.
+func TestFind_OrderBy(t *testing.T) {
+	ds, _ := setupTestDBWithData(t)
+	ctx := context.Background()
+
+	var results []CrudTestModel
+
+	opts := &typegorm.FindOptions{
+		OrderBy: []string{"nome_modelo DESC"}, // Ordena por nome descendente
+	}
+
+	t.Logf("Chamando typegorm.Find com OrderBy: %v", opts.OrderBy)
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.NoError(t, err, "typegorm.Find com OrderBy falhou")
+	require.Len(t, results, 5, "Esperado 5 registros totais") // Deve retornar todos
+
+	// Verifica a ordem
+	expectedOrder := []string{"Eve", "David", "Charlie", "Bob", "Alice"}
+	actualOrder := make([]string, len(results))
+	for i, r := range results {
+		actualOrder[i] = r.Nome
+	}
+	assert.Equal(t, expectedOrder, actualOrder, "Ordem dos resultados incorreta")
+	t.Logf("Find com OrderBy retornou a ordem correta: %v", actualOrder)
+}
+
+// Testa Find com LIMIT.
+func TestFind_Limit(t *testing.T) {
+	ds, _ := setupTestDBWithData(t)
+	ctx := context.Background()
+	var results []CrudTestModel
+	opts := &typegorm.FindOptions{Limit: 2} // Limita a 2 resultados
+
+	t.Logf("Chamando typegorm.Find com Limit: %d", opts.Limit)
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.NoError(t, err, "typegorm.Find com Limit falhou")
+	assert.Len(t, results, 2, "Esperado 2 registros devido ao Limit")
+	t.Logf("Find com Limit retornou %d registros.", len(results))
+}
+
+// Testa Find com OFFSET.
+func TestFind_Offset(t *testing.T) {
+	ds, _ := setupTestDBWithData(t)
+	ctx := context.Background()
+	var results []CrudTestModel
+	// Ordena por ID para ter um offset previsível
+	opts := &typegorm.FindOptions{Offset: 3, OrderBy: []string{"id ASC"}} // Pula os 3 primeiros
+
+	t.Logf("Chamando typegorm.Find com Offset: %d (OrderBy ID ASC)", opts.Offset)
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.NoError(t, err, "typegorm.Find com Offset falhou")
+	// Esperamos 2 resultados (total 5 - offset 3 = 2)
+	assert.Len(t, results, 2, "Esperado 2 registros após Offset 3")
+	// Verifica se os IDs são os últimos (assumindo 1 a 5)
+	if len(results) == 2 {
+		assert.Equal(t, uint(4), results[0].ID, "Primeiro resultado após offset incorreto") // ID 4
+		assert.Equal(t, uint(5), results[1].ID, "Segundo resultado após offset incorreto")  // ID 5
+	}
+	t.Logf("Find com Offset retornou %d registros (IDs %d, %d).", len(results), results[0].ID, results[1].ID)
+}
+
+// Testa Find com LIMIT e OFFSET combinados.
+func TestFind_LimitOffset(t *testing.T) {
+	ds, _ := setupTestDBWithData(t)
+	ctx := context.Background()
+	var results []CrudTestModel
+	// Pula 2, pega os próximos 2 (IDs 3 e 4)
+	opts := &typegorm.FindOptions{Limit: 2, Offset: 2, OrderBy: []string{"id ASC"}}
+
+	t.Logf("Chamando typegorm.Find com Limit: %d, Offset: %d (OrderBy ID ASC)", opts.Limit, opts.Offset)
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.NoError(t, err, "typegorm.Find com Limit/Offset falhou")
+	assert.Len(t, results, 2, "Esperado 2 registros")
+	if len(results) == 2 {
+		assert.Equal(t, uint(3), results[0].ID, "Primeiro resultado incorreto") // ID 3
+		assert.Equal(t, uint(4), results[1].ID, "Segundo resultado incorreto")  // ID 4
+	}
+	t.Logf("Find com Limit/Offset retornou %d registros (IDs %d, %d).", len(results), results[0].ID, results[1].ID)
+}
+
+// Testa Find quando nenhuma linha corresponde ao critério WHERE.
+func TestFind_NotFound(t *testing.T) {
+	ds, _ := setupTestDBWithData(t)
+	ctx := context.Background()
+	var results []CrudTestModel
+	opts := &typegorm.FindOptions{Where: map[string]any{"nome_modelo = ?": "Nome Que Nao Existe"}}
+
+	t.Logf("Chamando typegorm.Find esperando nenhum resultado...")
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.NoError(t, err, "typegorm.Find não deveria retornar erro quando nada é encontrado")
+	assert.Len(t, results, 0, "Esperado 0 registros")
+	assert.Empty(t, results, "Slice de resultados deveria estar vazio")
+	t.Log("Find esperando nenhum resultado retornou 0 registros, como esperado.")
+}
+
+// Testa erro ao usar coluna inválida no OrderBy.
+func TestFind_InvalidOrderByColumn(t *testing.T) {
+	ds := setupTestDB(t) // Não precisa de dados pré-inseridos
+	ctx := context.Background()
+	var results []CrudTestModel
+	opts := &typegorm.FindOptions{OrderBy: []string{"coluna_invalida ASC"}}
+
+	t.Log("Chamando typegorm.Find com coluna de ordenação inválida...")
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.Error(t, err, "Esperado erro para coluna de ordenação inválida")
+	assert.Contains(t, err.Error(), "coluna de ordenação inválida", "Mensagem de erro não contém o texto esperado")
+	t.Logf("Erro esperado recebido para coluna inválida: %v", err)
+}
+
+// Testa erro ao usar direção inválida no OrderBy.
+func TestFind_InvalidOrderByDirection(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+	var results []CrudTestModel
+	opts := &typegorm.FindOptions{OrderBy: []string{"nome_modelo INVAL"}} // Direção inválida
+
+	t.Log("Chamando typegorm.Find com direção de ordenação inválida...")
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.Error(t, err, "Esperado erro para direção de ordenação inválida")
+	assert.Contains(t, err.Error(), "direção de ordenação inválida", "Mensagem de erro não contém o texto esperado")
+	t.Logf("Erro esperado recebido para direção inválida: %v", err)
+}
+
+// Testa erro ao usar chave Where sem placeholder (na implementação atual).
+func TestFind_InvalidWherePlaceholder(t *testing.T) {
+	ds := setupTestDB(t)
+	ctx := context.Background()
+	var results []CrudTestModel
+	opts := &typegorm.FindOptions{Where: map[string]any{"status": 1}} // Falta ' = ?' na chave
+
+	t.Log("Chamando typegorm.Find com chave Where sem placeholder...")
+	err := typegorm.Find(ctx, ds, &results, opts)
+
+	require.Error(t, err, "Esperado erro para chave Where sem placeholder")
+	assert.Contains(t, err.Error(), "deve conter placeholder", "Mensagem de erro não contém o texto esperado")
+	t.Logf("Erro esperado recebido para chave Where inválida: %v", err)
 }
