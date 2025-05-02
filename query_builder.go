@@ -2,8 +2,10 @@ package typegorm // Ou o nome do seu pacote principal
 
 import (
 	"context"
+	"database/sql"
 	"errors" // Já vamos importar, pois usaremos para erros
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -529,7 +531,7 @@ func (qb *QueryBuilder) Preload(goRelationFieldNames ...string) *QueryBuilder {
 // se alguma validação falhar durante a construção (ex: Model não chamado).
 //
 // NOTA: Esta é a implementação inicial e NÃO inclui JOINs para Preload ainda.
-func (qb *QueryBuilder) buildSelectSQL() (sqlStr string, args []interface{}, err error) {
+func (qb *QueryBuilder) buildSelectSQL(forceLimitOne bool) (sqlStr string, args []interface{}, err error) {
 	// 1. Checa erros acumulados ou estado inválido essencial
 	if qb.buildErr != nil {
 		// Retorna o erro que já ocorreu durante a configuração (ex: campo inválido em OrderBy)
@@ -546,7 +548,7 @@ func (qb *QueryBuilder) buildSelectSQL() (sqlStr string, args []interface{}, err
 	// Usaremos strings.Builder para eficiência na concatenação do SQL
 	var sb strings.Builder
 	// Slice para acumular os argumentos na ordem correta dos placeholders '?'
-	args = make([]interface{}, 0)
+	args = make([]any, 0)
 
 	// --- Construção da Query ---
 
@@ -623,19 +625,26 @@ func (qb *QueryBuilder) buildSelectSQL() (sqlStr string, args []interface{}, err
 	}
 
 	// 6. Cláusula LIMIT
-	if qb.limit >= 0 { // -1 significa que não foi definido
+	applyLimit := -1 // Valor padrão indicando sem limite explícito
+	if forceLimitOne {
+		applyLimit = 1 // GetOne força LIMIT 1
+	} else if qb.limit >= 0 {
+		applyLimit = qb.limit // Usa o LIMIT definido pelo usuário via .Limit()
+	}
+
+	if applyLimit >= 0 {
 		sb.WriteString(" LIMIT ?")
-		args = append(args, qb.limit) // Adiciona o valor do limit aos args
+		args = append(args, applyLimit)
 	}
 
 	// 7. Cláusula OFFSET
 	if qb.offset >= 0 { // -1 significa que não foi definido
 		// Aviso se OFFSET for usado sem LIMIT (pode ter comportamento inesperado)
-		if qb.limit < 0 {
-			fmt.Printf("%s OFFSET %d definido sem LIMIT. Comportamento pode variar entre bancos de dados. [%s]\n", logPrefixWarn, qb.offset, time.Now().Format(time.RFC3339))
+		if applyLimit < 0 { // Só avisa se realmente não houver LIMIT
+			fmt.Printf("%s OFFSET %d definido sem LIMIT explícito ou implícito (GetOne). Comportamento pode variar. [%s]\n", logPrefixWarn, qb.offset, time.Now().Format(time.RFC3339))
 		}
 		sb.WriteString(" OFFSET ?")
-		args = append(args, qb.offset) // Adiciona o valor do offset aos args
+		args = append(args, qb.offset)
 	}
 
 	// --- Fim da Construção ---
@@ -652,4 +661,149 @@ func (qb *QueryBuilder) buildSelectSQL() (sqlStr string, args []interface{}, err
 
 	// Retorna o SQL montado, os argumentos coletados, e nil (sem erro nesta etapa)
 	return finalSQL, args, nil
+}
+
+// GetOne executa a query construída esperando exatamente um resultado e o escaneia
+// no ponteiro `dest`.
+// `dest` deve ser um ponteiro para a struct do tipo definido em `Model()` (ex: &User{}).
+// Retorna:
+// - nil: se um registro for encontrado e escaneado com sucesso.
+// - sql.ErrNoRows: se nenhum registro for encontrado.
+// - Outro erro: se ocorrer um problema na construção da query, execução ou scan.
+func (qb *QueryBuilder) GetOne(dest any) error {
+	// 1. Checa erros de construção ou estado inválido
+	if qb.buildErr != nil {
+		return fmt.Errorf("GetOne: erro na construção da query: %w", qb.buildErr)
+	}
+	if qb.entityMeta == nil {
+		return errors.New("GetOne: Model() deve ser chamado antes de executar a query")
+	}
+
+	// 2. Constrói o SQL, garantindo LIMIT 1
+	sqlStr, args, err := qb.buildSelectSQL(true) // Passa true para forçar LIMIT 1
+	if err != nil {
+		// Log do erro já ocorreu em buildSelectSQL ou nos métodos anteriores
+		return fmt.Errorf("GetOne: falha ao construir SQL: %w", err)
+	}
+
+	// 3. Log de Execução (SQL e Args já logados por buildSelectSQL)
+	fmt.Printf("%s Executando GetOne para %s... [%s]\n", logPrefixInfo, qb.entityMeta.Name, time.Now().Format(time.RFC3339))
+
+	// 4. Executa a query no banco
+	rows, err := qb.dataSource.QueryContext(qb.ctx, sqlStr, args...)
+	if err != nil {
+		fmt.Printf("%s Erro ao executar QueryContext: %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return fmt.Errorf("GetOne: falha na execução da query: %w", err)
+	}
+	// Defer rows.Close() é tratado dentro de scanSingleRow
+
+	// 5. Escaneia o resultado único usando a função refatorada
+	err = scanSingleRow(rows, qb.entityMeta, dest) // Passa os rows, metadados e o destino
+	if err != nil {
+		// scanSingleRow já loga os erros internos de scan/validação/db
+		// Retorna o erro como veio (pode ser sql.ErrNoRows ou outro)
+		if !errors.Is(err, sql.ErrNoRows) { // Loga apenas se não for o esperado ErrNoRows
+			fmt.Printf("%s Erro retornado por scanSingleRow: %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		}
+		return err
+	}
+
+	// 6. Lógica de Preload (a ser implementada)
+	// Se chegou aqui, 'dest' está populado com os dados da entidade principal.
+	if len(qb.preload) > 0 {
+		// Aviso temporário enquanto não implementado
+		fmt.Printf("%s Preload solicitado para %v (ainda não implementado em GetOne). [%s]\n",
+			logPrefixWarn, maps.Keys(qb.preload), time.Now().Format(time.RFC3339))
+
+		// --- Lógica Futura de Preload para GetOne ---
+		// Para cada relação em qb.preload:
+		//   1. Obter o RelationMetadata correspondente.
+		//   2. Obter o valor da FK na struct `dest` (ou PK se for lado inverso).
+		//   3. Construir uma nova query (usando QueryBuilder?) para buscar a(s) entidade(s) relacionadas.
+		//   4. Executar a query de preload.
+		//   5. Usar reflection para setar o resultado (struct ou slice) no campo da relação em `dest`.
+		// Ex: err = qb.executePreloadForSingle(dest)
+		// if err != nil { return fmt.Errorf("GetOne: erro no preload: %w", err) }
+	}
+
+	// 7. Sucesso!
+	// Log opcional de sucesso
+	// fmt.Printf("%s GetOne para %s concluído com sucesso. [%s]\n", logPrefixInfo, qb.entityMeta.Name, time.Now().Format(time.RFC3339))
+	return nil
+}
+
+// GetMany executa a query construída esperando múltiplos resultados e os escaneia
+// no slice apontado por `dest`.
+// `dest` deve ser um ponteiro para um slice do tipo definido em `Model()`
+// (ex: *[]User ou *[]*User).
+// Retorna nil se a query for executada e escaneada com sucesso (o slice pode
+// estar vazio se nenhum registro for encontrado). Retorna um erro em caso de falha.
+func (qb *QueryBuilder) GetMany(dest interface{}) error {
+	// 1. Checa erros de construção ou estado inválido
+	if qb.buildErr != nil {
+		return fmt.Errorf("GetMany: erro na construção da query: %w", qb.buildErr)
+	}
+	if qb.entityMeta == nil {
+		return errors.New("GetMany: Model() deve ser chamado antes de executar a query")
+	}
+
+	// 2. Constrói o SQL (sem forçar LIMIT 1)
+	sqlStr, args, err := qb.buildSelectSQL(false) // Passa false
+	if err != nil {
+		return fmt.Errorf("GetMany: falha ao construir SQL: %w", err)
+	}
+
+	// 3. Log de Execução
+	fmt.Printf("%s Executando GetMany para slice de %s... [%s]\n", logPrefixInfo, qb.entityMeta.Name, time.Now().Format(time.RFC3339))
+
+	// 4. Executa a query no banco
+	rows, err := qb.dataSource.QueryContext(qb.ctx, sqlStr, args...)
+	if err != nil {
+		fmt.Printf("%s Erro ao executar QueryContext: %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return fmt.Errorf("GetMany: falha na execução da query: %w", err)
+	}
+	// Defer rows.Close() é tratado dentro de scanRowsToSlice
+
+	// 5. Escaneia os resultados para o slice usando a função refatorada
+	startTime := time.Now() // Medir tempo de scan (opcional)
+	err = scanRowsToSlice(rows, qb.entityMeta, dest)
+	if err != nil {
+		// scanRowsToSlice já loga os erros internos de scan/validação/db
+		fmt.Printf("%s Erro retornado por scanRowsToSlice: %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return err // Retorna erro de scan
+	}
+	scanDuration := time.Since(startTime)
+
+	// 6. Lógica de Preload (a ser implementada)
+	// Se chegou aqui, 'dest' (o slice) está populado com as entidades principais.
+	if len(qb.preload) > 0 {
+		// Aviso temporário
+		fmt.Printf("%s Preload solicitado para %v (ainda não implementado em GetMany). [%s]\n",
+			logPrefixWarn, maps.Keys(qb.preload), time.Now().Format(time.RFC3339))
+
+		// --- Lógica Futura de Preload para GetMany ---
+		// Para cada relação em qb.preload:
+		//   1. Obter o RelationMetadata.
+		//   2. Iterar sobre o slice `dest` populado e coletar todos os IDs/FKs relevantes.
+		//   3. Montar uma query eficiente para buscar TODAS as entidades relacionadas de uma vez
+		//      (ex: SELECT * FROM profiles WHERE user_id IN (?, ?, ...)).
+		//   4. Executar a query de preload.
+		//   5. Mapear os resultados do preload de volta para as entidades correspondentes no slice `dest`.
+		//      (Geralmente usando um mapa para acesso rápido: map[ForeignKey]*RelatedStruct).
+		//   6. Usar reflection para setar as relações em cada item do slice `dest`.
+		// Ex: err = qb.executePreloadForSlice(dest)
+		// if err != nil { return fmt.Errorf("GetMany: erro no preload: %w", err) }
+	}
+
+	// 7. Sucesso! Log com informações úteis.
+	destVal := reflect.ValueOf(dest)
+	numRecords := 0
+	// Verifica se o ponteiro não é nulo e o elemento é um slice antes de chamar Len()
+	if destVal.IsValid() && !destVal.IsNil() && destVal.Elem().Kind() == reflect.Slice {
+		numRecords = destVal.Elem().Len()
+	}
+	fmt.Printf("%s GetMany para %s concluído. %d registro(s) escaneado(s) em %s. [%s]\n",
+		logPrefixInfo, qb.entityMeta.Name, numRecords, scanDuration.Round(time.Millisecond), time.Now().Format(time.RFC3339))
+
+	return nil
 }

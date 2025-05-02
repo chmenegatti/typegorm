@@ -137,3 +137,138 @@ func scanSingleRow(rows *sql.Rows, meta *metadata.EntityMetadata, destPtr interf
 	// fmt.Printf("%s Linha única escaneada com sucesso para %s. [%s]\n", logPrefixDebug, meta.Name, time.Now().Format(time.RFC3339))
 	return nil
 }
+
+// scanRowsToSlice escaneia todas as linhas de rows e as anexa ao slice
+// apontado por slicePtr.
+// slicePtr deve ser um ponteiro para um slice de structs OU um ponteiro para um slice
+// de ponteiros para structs (ex: *[]User ou *[]*User). A função determina
+// qual caso é e popula corretamente.
+// Fecha rows ao final ou em caso de erro.
+// Retorna nil se bem sucedido (mesmo que nenhuma linha seja escaneada,
+// resultando em um slice vazio), ou um erro.
+func scanRowsToSlice(rows *sql.Rows, meta *metadata.EntityMetadata, slicePtr interface{}) (err error) {
+	// Garante fechamento de rows
+	defer func() {
+		closeErr := rows.Close()
+		if closeErr != nil && err == nil {
+			err = fmt.Errorf("erro ao fechar rows: %w", closeErr)
+			fmt.Printf("[ERROR-SCANNER] %v [%s]\n", err, time.Now().Format(time.RFC3339))
+		}
+	}()
+
+	// 1. Validação do slicePtr (deve ser *[]Tipo ou *[]*Tipo)
+	sliceVal := reflect.ValueOf(slicePtr)
+	if sliceVal.Kind() != reflect.Ptr || sliceVal.IsNil() {
+		return errors.New("scanRowsToSlice: slicePtr deve ser um ponteiro não-nilo para um slice")
+	}
+	sliceDest := sliceVal.Elem() // O slice em si (ex: []User ou []*User)
+	if sliceDest.Kind() != reflect.Slice {
+		return errors.New("scanRowsToSlice: slicePtr deve apontar para um slice")
+	}
+
+	// 2. Determina o tipo dos elementos do slice
+	sliceElemType := sliceDest.Type().Elem() // Tipo do elemento (ex: User ou *User)
+	isPtrElement := sliceElemType.Kind() == reflect.Ptr
+	var structType reflect.Type // Tipo da struct base (ex: User)
+
+	if isPtrElement {
+		structType = sliceElemType.Elem() // Pega User de *User
+		if structType.Kind() != reflect.Struct {
+			return fmt.Errorf("scanRowsToSlice: slicePtr (%T) aponta para slice de ponteiros para não-struct (%s)", slicePtr, structType)
+		}
+	} else if sliceElemType.Kind() == reflect.Struct {
+		structType = sliceElemType // É User de []User
+	} else {
+		return fmt.Errorf("scanRowsToSlice: slicePtr (%T) aponta para slice de tipo não suportado (%s)", slicePtr, sliceElemType)
+	}
+
+	// Valida se o tipo base da struct corresponde aos metadados
+	if structType != meta.Type {
+		return fmt.Errorf("scanRowsToSlice: tipo do elemento do slice (%s) não corresponde ao tipo dos metadados (%s)", structType, meta.Type)
+	}
+
+	// 3. Obtém nomes das colunas do resultado
+	columns, err := rows.Columns()
+	if err != nil {
+		fmt.Printf("[ERROR-SCANNER] Erro ao obter colunas do resultado: %v [%s]\n", err, time.Now().Format(time.RFC3339))
+		return fmt.Errorf("erro ao obter nomes das colunas: %w", err)
+	}
+	// Se não houver colunas, não há o que fazer, retorna slice vazio (sem erro)
+	if len(columns) == 0 {
+		fmt.Printf("[WARN-SCANNER] Nenhuma coluna retornada na query para slice scan. [%s]\n", time.Now().Format(time.RFC3339))
+		return nil
+	}
+
+	// 4. Prepara mapa reverso para performance no loop (DB Col -> Campo Struct)
+	// Poderia ser pré-calculado e passado como argumento se chamado muitas vezes.
+	dbNameToColMeta := meta.ColumnsByDbName // Reutiliza o mapa dos metadados
+
+	// 5. Itera sobre as linhas do resultado
+	baseSlice := sliceDest // Guarda a referência original do slice para usar Append
+
+	for rows.Next() {
+		// Cria uma NOVA instância da struct base para cada linha
+		// reflect.New sempre retorna um ponteiro (*StructType)
+		newStructPtrVal := reflect.New(structType) // Ex: *User
+		newStructVal := newStructPtrVal.Elem()     // Ex: User (endereçável)
+
+		// Prepara os argumentos para o Scan desta linha, apontando para os campos da nova instância
+		scanArgs := make([]interface{}, len(columns))
+		mappedFields := 0
+		for i, colName := range columns {
+			colMeta, ok := dbNameToColMeta[colName]
+			if !ok {
+				var ignored sql.RawBytes // Ignora coluna não mapeada
+				scanArgs[i] = &ignored
+				continue
+			}
+
+			// Pega o campo na *nova* struct criada
+			fieldVal := newStructVal.FieldByName(colMeta.FieldName)
+			if !fieldVal.IsValid() || !fieldVal.CanSet() {
+				err = fmt.Errorf("scanRowsToSlice: campo '%s' (coluna '%s') inválido/não configurável em %s", colMeta.FieldName, colName, meta.Name)
+				fmt.Printf("[ERROR-SCANNER] %v [%s]\n", err, time.Now().Format(time.RFC3339))
+				return err // Erro fatal aqui
+			}
+			scanArgs[i] = fieldVal.Addr().Interface() // Adiciona ponteiro do campo aos args do scan
+			mappedFields++
+		}
+
+		if mappedFields == 0 && len(columns) > 0 {
+			// Nenhuma coluna correspondeu? Pode ser um erro de query. Logar e continuar? Ou erro?
+			// Vamos logar um aviso e continuar, pois pode ser um SELECT em tabela errada
+			fmt.Printf("[WARN-SCANNER] Nenhuma coluna retornada (%v) foi mapeada para campos da struct %s em uma das linhas. [%s]\n", columns, meta.Name, time.Now().Format(time.RFC3339))
+			// Não retorna erro aqui, apenas resultará em structs zeradas no slice se isso acontecer para todas as linhas.
+		}
+
+		// Escaneia a linha atual nos campos da nova struct
+		err = rows.Scan(scanArgs...)
+		if err != nil {
+			fmt.Printf("[ERROR-SCANNER] Erro durante rows.Scan para slice: %v [%s]\n", err, time.Now().Format(time.RFC3339))
+			return fmt.Errorf("erro ao escanear dados da linha para struct %s: %w", structType.Name(), err)
+		}
+
+		// Adiciona a nova struct (ou ponteiro para ela) ao slice de destino
+		if isPtrElement {
+			// O slice destino é do tipo []*StructType, então adiciona o ponteiro criado
+			baseSlice = reflect.Append(baseSlice, newStructPtrVal)
+		} else {
+			// O slice destino é do tipo []StructType, então adiciona o valor da struct
+			baseSlice = reflect.Append(baseSlice, newStructVal)
+		}
+	} // Fim do loop rows.Next()
+
+	// 6. Atualiza o slice original via ponteiro
+	// sliceDest é o slice original (ex: o valor de *slicePtr)
+	// baseSlice contém os elementos adicionados. Precisamos fazer sliceDest = baseSlice
+	sliceDest.Set(baseSlice)
+
+	// 7. Verifica erro final de iteração do rows
+	if err = rows.Err(); err != nil {
+		fmt.Printf("[ERROR-SCANNER] Erro final após iteração de rows para slice: %v [%s]\n", err, time.Now().Format(time.RFC3339))
+		return fmt.Errorf("erro de iteração de rows: %w", err)
+	}
+
+	// Tudo certo, o slice em slicePtr foi populado (pode estar vazio se não houver resultados)
+	return nil
+}
