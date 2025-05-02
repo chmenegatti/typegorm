@@ -296,3 +296,140 @@ func (qb *QueryBuilder) OrWhere(queryFragment string, args ...interface{}) *Quer
 	// 6. Retorna o builder
 	return qb
 }
+
+// OrderBy adiciona uma cláusula ORDER BY à query.
+// Aceita o nome do campo da struct Go (ex: "NomeUsuario", "DataCriacao") pelo qual ordenar.
+// O segundo argumento opcional 'direction' especifica a direção: "ASC" (padrão) ou "DESC".
+// A comparação da direção é case-insensitive (aceita "desc", "DESC", "Desc").
+// Múltiplas chamadas a OrderBy adicionam critérios de ordenação secundários.
+// A ordem das chamadas importa.
+// Ex: qb.OrderBy("DataCriacao", "DESC").OrderBy("NomeUsuario")
+//
+//	Resulta em SQL: ORDER BY data_criacao DESC, nome_usuario ASC
+func (qb *QueryBuilder) OrderBy(goFieldName string, direction ...string) *QueryBuilder {
+	// 1. Checa erro prévio na construção
+	if qb.buildErr != nil {
+		return qb
+	}
+
+	// 2. Garante que Model() foi chamado, pois precisamos dos metadados para mapear o campo
+	if qb.entityMeta == nil {
+		err := errors.New("OrderBy: Model() deve ser chamado antes de OrderBy()")
+		qb.buildErr = err
+		fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return qb
+	}
+
+	// 3. Valida o nome do campo e obtém o nome da coluna no banco
+	trimmedFieldName := strings.TrimSpace(goFieldName)
+	if trimmedFieldName == "" {
+		err := errors.New("OrderBy: nome do campo não pode ser vazio")
+		qb.buildErr = err
+		fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return qb
+	}
+
+	// Procura o campo nos metadados das colunas
+	colMeta, ok := qb.entityMeta.ColumnsByName[trimmedFieldName]
+	if !ok {
+		// Se não achou, dá um erro claro, diferenciando se é relação ou campo inexistente
+		errMsg := ""
+		if _, isRelation := qb.entityMeta.RelationsByName[trimmedFieldName]; isRelation {
+			errMsg = fmt.Sprintf("OrderBy: campo '%s' em %s é uma relação, não uma coluna. Não é possível ordenar diretamente por relações desta forma.", trimmedFieldName, qb.entityMeta.Name)
+		} else {
+			errMsg = fmt.Sprintf("OrderBy: campo '%s' não encontrado ou não é uma coluna mapeada em %s", trimmedFieldName, qb.entityMeta.Name)
+		}
+		err := errors.New(errMsg)
+		qb.buildErr = err
+		fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return qb
+	}
+	// Guarda o nome da coluna no banco de dados (ex: "data_criacao")
+	dbColumnName := colMeta.ColumnName
+
+	// 4. Determina a direção da ordenação (ASC ou DESC)
+	orderDirection := "ASC" // Padrão é ASC
+	if len(direction) > 0 {
+		// Pega o primeiro argumento de direção, remove espaços e compara case-insensitive
+		dirArg := strings.TrimSpace(direction[0])
+		if strings.EqualFold(dirArg, "DESC") {
+			orderDirection = "DESC"
+		}
+		// Qualquer outra coisa diferente de "DESC" (case-insensitive) resulta em ASC
+	}
+
+	// 5. Cria a struct 'orderByClause' com os dados corretos
+	clause := orderByClause{
+		column:    dbColumnName,   // Nome da coluna no DB
+		direction: orderDirection, // "ASC" ou "DESC"
+	}
+
+	// 6. Adiciona a cláusula à lista de ordenações do builder
+	qb.orderBy = append(qb.orderBy, clause)
+
+	// 7. Log informativo
+	fmt.Printf("%s Cláusula ORDER BY adicionada: %s %s [%s]\n", logPrefixInfo, dbColumnName, orderDirection, time.Now().Format(time.RFC3339))
+
+	// 8. Retorna o builder para encadeamento
+	return qb
+}
+
+// Limit especifica o número máximo de registros a serem retornados pela query.
+// Um valor negativo resultará em erro. Um valor de 0 é geralmente interpretado
+// pelos bancos de dados como "retornar zero registros".
+// Corresponde à cláusula LIMIT (ou equivalente) do SQL.
+func (qb *QueryBuilder) Limit(limit int) *QueryBuilder {
+	// 1. Checa erro prévio na construção
+	if qb.buildErr != nil {
+		return qb
+	}
+
+	// 2. Valida se o limit é não-negativo
+	if limit < 0 {
+		err := fmt.Errorf("Limit: valor (%d) não pode ser negativo", limit)
+		qb.buildErr = err
+		// Log do erro de validação
+		fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return qb
+	}
+
+	// 3. Armazena o valor no QueryBuilder
+	// O valor -1 (inicial) significa "sem limite definido". Qualquer valor >= 0 sobrescreve.
+	qb.limit = limit
+
+	// 4. Log informativo
+	fmt.Printf("%s Cláusula LIMIT definida para: %d [%s]\n", logPrefixInfo, limit, time.Now().Format(time.RFC3339))
+
+	// 5. Retorna o builder para encadeamento
+	return qb
+}
+
+// Offset especifica o número de registros a serem pulados (deslocamento)
+// antes de começar a retornar os registros. Quase sempre usado em conjunto com Limit.
+// Um valor negativo resultará em erro. Um valor de 0 significa "começar do primeiro registro".
+// Corresponde à cláusula OFFSET (ou equivalente) do SQL.
+func (qb *QueryBuilder) Offset(offset int) *QueryBuilder {
+	// 1. Checa erro prévio na construção
+	if qb.buildErr != nil {
+		return qb
+	}
+
+	// 2. Valida se o offset é não-negativo
+	if offset < 0 {
+		err := fmt.Errorf("Offset: valor (%d) não pode ser negativo", offset)
+		qb.buildErr = err
+		// Log do erro de validação
+		fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return qb
+	}
+
+	// 3. Armazena o valor no QueryBuilder
+	// O valor -1 (inicial) significa "sem offset definido". Qualquer valor >= 0 sobrescreve.
+	qb.offset = offset
+
+	// 4. Log informativo
+	fmt.Printf("%s Cláusula OFFSET definida para: %d [%s]\n", logPrefixInfo, offset, time.Now().Format(time.RFC3339))
+
+	// 5. Retorna o builder para encadeamento
+	return qb
+}
