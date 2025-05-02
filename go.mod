@@ -3,6 +3,7 @@ module github.com/chmenegatti/typegorm
 go 1.23.2
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/go-sql-driver/mysql v1.9.2
 	github.com/iancoleman/strcase v0.3.0
 	github.com/jackc/pgx/v5 v5.7.4
