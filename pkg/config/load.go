@@ -1,4 +1,4 @@
-// pkg/config/load.go
+// pkg/config/load.go (Correção das mensagens de erro)
 package config
 
 import (
@@ -9,68 +9,64 @@ import (
 	"github.com/spf13/viper"
 )
 
-// LoadConfig carrega a configuração a partir de arquivos, env vars e defaults.
-// configPath: caminho opcional para um arquivo de configuração específico.
-// Se configPath for vazio, procura por "typegorm.yaml" nos diretórios padrão.
+// LoadConfig loads configuration from files, environment variables, and defaults.
+// configPath: optional path to a specific configuration file.
+// If configPath is empty, searches for "typegorm.yaml" in standard locations.
 func LoadConfig(configPath string) (Config, error) {
 	v := viper.New()
-	cfg := NewDefaultConfig() // Começa com os padrões
+	cfg := NewDefaultConfig() // Start with defaults
 
-	// 1. Definir padrões no Viper (para que possam ser sobrescritos)
+	// 1. Set defaults in Viper
 	v.SetDefault("database.pool.maxIdleConns", cfg.Database.Pool.MaxIdleConns)
 	v.SetDefault("database.pool.maxOpenConns", cfg.Database.Pool.MaxOpenConns)
 	v.SetDefault("database.pool.connMaxLifetime", cfg.Database.Pool.ConnMaxLifetime)
 	v.SetDefault("logging.level", cfg.Logging.Level)
 	v.SetDefault("logging.format", cfg.Logging.Format)
 	v.SetDefault("migration.directory", cfg.Migration.Directory)
-	// Não definimos padrão para dialect e dsn, pois são obrigatórios
 
-	// 2. Configurar leitura de Variáveis de Ambiente
-	v.SetEnvPrefix("TYPEGORM") // Ex: TYPEGORM_DATABASE_DIALECT=mysql
+	// 2. Configure reading from Environment Variables
+	v.SetEnvPrefix("TYPEGORM")
 	v.AutomaticEnv()
-	// Permite que TYPEGORM_DATABASE_DSN sobrescreva database.dsn
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
-	// 3. Configurar leitura do Arquivo de Configuração
+	// 3. Configure reading from Configuration File
 	if configPath != "" {
-		// Usar arquivo de configuração específico fornecido via flag/param
 		v.SetConfigFile(configPath)
 	} else {
-		// Procurar por arquivo de configuração nos diretórios padrão
-		v.SetConfigName("typegorm")        // Nome do arquivo (sem extensão)
-		v.SetConfigType("yaml")            // Extensão/tipo do arquivo
-		v.AddConfigPath(".")               // Procurar no diretório atual
-		v.AddConfigPath("$HOME/.typegorm") // Procurar em ~/.typegorm/
-		// Poderia adicionar /etc/typegorm/ também, se apropriado
+		v.SetConfigName("typegorm")
+		v.SetConfigType("yaml")
+		v.AddConfigPath(".")
+		v.AddConfigPath("$HOME/.typegorm")
 	}
 
-	// Tentar ler o arquivo de configuração
+	// Attempt to read the configuration file
 	if err := v.ReadInConfig(); err != nil {
-		// Erro só é fatal se não for "arquivo não encontrado" E um configPath específico foi dado
+		// Error is only fatal if it's not "file not found" AND a specific configPath was given
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok || configPath != "" {
-			return cfg, fmt.Errorf("erro ao ler arquivo de configuração: %w", err)
+			// Use English error message here
+			return cfg, fmt.Errorf("error reading configuration file: %w", err)
 		}
-		// Se o arquivo não foi encontrado, mas não era obrigatório, tudo bem.
-		// As configurações virão dos defaults ou env vars.
-		fmt.Println("Arquivo de configuração não encontrado, usando defaults/env vars.") // Logar isso adequadamente depois
+		// Log or print that config file was not found (optional)
+		// fmt.Println("Configuration file not found, using defaults/env vars.")
 	}
 
-	// 4. Fazer o Unmarshal das configurações lidas para a struct Config
+	// 4. Unmarshal the configuration into the Config struct
 	if err := v.Unmarshal(&cfg); err != nil {
-		return cfg, fmt.Errorf("erro ao fazer unmarshal da configuração: %w", err)
+		// Use English error message here
+		return cfg, fmt.Errorf("error unmarshaling configuration: %w", err)
 	}
 
-	// 5. Validar a struct de configuração
+	// 5. Validate the configuration struct
 	validate := validator.New()
 	if err := validate.Struct(cfg); err != nil {
-		// Transforma erros de validação em algo mais legível
 		var validationErrors []string
 		for _, err := range err.(validator.ValidationErrors) {
-			validationErrors = append(validationErrors, fmt.Sprintf("Campo '%s' falhou na validação '%s'", err.Namespace(), err.Tag()))
+			validationErrors = append(validationErrors, fmt.Sprintf("Field '%s' failed validation on '%s'", err.Namespace(), err.Tag()))
 		}
-		return cfg, fmt.Errorf("configuração inválida: %s", strings.Join(validationErrors, "; "))
+		// Use English error message here
+		return cfg, fmt.Errorf("invalid configuration: %s", strings.Join(validationErrors, "; "))
 	}
 
-	// 6. Retornar a configuração carregada e validada
+	// 6. Return the loaded and validated configuration
 	return cfg, nil
 }
