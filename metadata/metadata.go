@@ -34,9 +34,13 @@ type EntityMetadata struct {
 	UpdatedAtColumn *ColumnMetadata
 	DeletedAtColumn *ColumnMetadata
 
-	// --- NOVO: Armazena informações sobre as relações ---
+	// Armazena informações sobre as relações
 	Relations       []*RelationMetadata          // Lista de todas as relações definidas nesta entidade
 	RelationsByName map[string]*RelationMetadata // Mapa [NomeDoCampoGo] -> *RelationMetadata
+
+	// Mapeia o nome da coluna no banco de dados para o metadado da coluna/campo.
+	// Essencial para o processo de Scan.
+	ColumnsByDbName map[string]*ColumnMetadata
 }
 
 // ColumnMetadata armazena metadados sobre um campo de struct mapeado para uma coluna.
