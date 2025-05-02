@@ -1,0 +1,7 @@
+database:
+  dialect: "sqlite" # Obrigatório
+  dsn: "file:test.db?cache=shared" # Obrigatório
+migration:
+  directory: "./db_migrations_test"
+logging:
+  level: "debug"

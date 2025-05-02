@@ -55,7 +55,7 @@ func TestMigrateStatusCommand(t *testing.T) {
 	// Limpamos cfgFile global antes de cada teste ou o definimos via SetArgs/Flags diretamente
 	cfgFile = "" // Resetar flag global ou evitar usá-la diretamente nos testes
 
-	stdout, stderr, err := executeCommand(rootCmd, "migrate", "status", "--config", tempConfigFile)
+	stdout, stderr, err := executeCommand(rootCmd, "migrate", "status", "--config", "./typegorm.yaml")
 
 	// 3. Asserts: Verificar a saída e erros
 	assert.NoError(t, err, "Command execution failed") // assert permite continuar mesmo se falhar
