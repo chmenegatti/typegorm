@@ -224,27 +224,15 @@ func (qb *QueryBuilder) Select(goFieldNames ...string) *QueryBuilder {
 	return qb
 }
 
-// Where adiciona uma condição à cláusula WHERE da query SQL.
-// Aceita um fragmento de SQL com placeholders '?' e os argumentos correspondentes.
-// Múltiplas chamadas a Where são implicitamente unidas por 'AND' quando a
-// query final é construída.
-//
-// Exemplos:
-//
-//	qb.Where("idade > ?", 18)
-//	qb.Where("ativo = ? AND cidade = ?", true, "São Paulo")
-//	qb.Where("nome LIKE ?", "%"+termoBusca+"%")
-//	qb.Where("status IN (?)", sliceDeStatus) // Drivers sql geralmente expandem slices para '?, ?, ?'
-//
-// IMPORTANTE: Por segurança, use SEMPRE placeholders '?' para os valores
-// e passe os valores como argumentos em `args`. NÃO formate valores diretamente
-// na string `queryFragment` para evitar SQL Injection.
-func (qb *QueryBuilder) Where(queryFragment string, args ...any) *QueryBuilder {
+// Where adiciona uma condição à cláusula WHERE da query SQL, conectada por AND.
+// Múltiplas chamadas a Where ou OrWhere são adicionadas sequencialmente.
+// A forma como são unidas ("AND" ou "OR") depende de qual método foi usado para adicioná-las.
+// Ex: qb.Where("a=?", 1).Where("b=?", 2) -> WHERE (a=?) AND (b=?)
+func (qb *QueryBuilder) Where(queryFragment string, args ...interface{}) *QueryBuilder {
 	// 1. Checa erro prévio
 	if qb.buildErr != nil {
 		return qb
 	}
-
 	// 2. Validações básicas
 	trimmedQuery := strings.TrimSpace(queryFragment)
 	if trimmedQuery == "" {
@@ -254,26 +242,57 @@ func (qb *QueryBuilder) Where(queryFragment string, args ...any) *QueryBuilder {
 		return qb
 	}
 
-	// Opcional: Contar '?' e comparar com len(args)? Pode ser complexo e falhar
-	// em casos legítimos (ex: '?' dentro de strings literais na query).
-	// Deixaremos a validação de contagem de args para o driver do banco por enquanto.
-
-	// 3. Cria a struct da condição
+	// 3. Cria a struct da condição com conector "AND"
 	condition := sqlCondition{
-		query: trimmedQuery,
-		args:  args,
+		query:     trimmedQuery,
+		args:      args,
+		connector: "AND", // Esta condição se conectará à anterior com AND
 	}
 
 	// 4. Adiciona a condição à lista
 	qb.conditions = append(qb.conditions, condition)
 
-	// 5. Log informativo
-	// Cuidado ao logar args, podem conter dados sensíveis. Logar apenas a query?
-	// Ou logar os tipos dos args? Por enquanto, logamos a query e o número de args.
-	fmt.Printf("%s Condição WHERE adicionada: \"%s\" (Args: %d) [%s]\n", logPrefixInfo, trimmedQuery, len(args), time.Now().Format(time.RFC3339))
+	// 5. Log informativo (indicando que é AND)
+	fmt.Printf("%s Condição AND WHERE adicionada: \"%s\" (Args: %d) [%s]\n", logPrefixInfo, trimmedQuery, len(args), time.Now().Format(time.RFC3339))
 
 	// 6. Retorna o builder
 	return qb
 }
 
-// TODO: Implementar OrWhere(...) para adicionar condições com OR.
+// OrWhere adiciona uma condição à cláusula WHERE da query SQL, conectada por OR.
+// Funciona de forma similar ao Where, mas usará OR para conectar com a condição anterior.
+// Ex: qb.Where("a=?", 1).OrWhere("b=?", 2) -> WHERE (a=?) OR (b=?)
+//
+// IMPORTANTE: Use placeholders '?' e passe valores via `args` para segurança.
+// Cuidado com a precedência de operadores SQL (AND geralmente é avaliado antes de OR)
+// ao misturar Where e OrWhere sem um mecanismo de agrupamento explícito (futuro).
+func (qb *QueryBuilder) OrWhere(queryFragment string, args ...interface{}) *QueryBuilder {
+	// 1. Checa erro prévio
+	if qb.buildErr != nil {
+		return qb
+	}
+	// 2. Validações básicas (idênticas ao Where)
+	trimmedQuery := strings.TrimSpace(queryFragment)
+	if trimmedQuery == "" {
+		err := errors.New("OrWhere: queryFragment não pode ser vazio")
+		qb.buildErr = err
+		fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return qb
+	}
+
+	// 3. Cria a struct da condição com conector "OR"
+	condition := sqlCondition{
+		query:     trimmedQuery,
+		args:      args,
+		connector: "OR", // Esta condição se conectará à anterior com OR
+	}
+
+	// 4. Adiciona a condição à lista
+	qb.conditions = append(qb.conditions, condition)
+
+	// 5. Log informativo (indicando que é OR)
+	fmt.Printf("%s Condição OR WHERE adicionada: \"%s\" (Args: %d) [%s]\n", logPrefixInfo, trimmedQuery, len(args), time.Now().Format(time.RFC3339))
+
+	// 6. Retorna o builder
+	return qb
+}
