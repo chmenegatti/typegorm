@@ -47,8 +47,9 @@ type QueryBuilder struct {
 // sqlCondition representa uma condição WHERE simples.
 // Futuramente, pode evoluir para suportar OR, grupos, etc.
 type sqlCondition struct {
-	query string // Fragmento SQL da condição (ex: "idade > ?", "status = ?")
-	args  []any  // Argumentos para os placeholders no fragmento
+	query     string // Fragmento SQL da condição (ex: "idade > ?", "status = ?")
+	args      []any  // Argumentos para os placeholders no fragmento
+	connector string // Conector lógico (AND/OR) - não usado ainda
 }
 
 // orderByClause representa uma cláusula ORDER BY para uma coluna.
@@ -222,3 +223,57 @@ func (qb *QueryBuilder) Select(goFieldNames ...string) *QueryBuilder {
 	// 7. Retorna o builder para encadeamento
 	return qb
 }
+
+// Where adiciona uma condição à cláusula WHERE da query SQL.
+// Aceita um fragmento de SQL com placeholders '?' e os argumentos correspondentes.
+// Múltiplas chamadas a Where são implicitamente unidas por 'AND' quando a
+// query final é construída.
+//
+// Exemplos:
+//
+//	qb.Where("idade > ?", 18)
+//	qb.Where("ativo = ? AND cidade = ?", true, "São Paulo")
+//	qb.Where("nome LIKE ?", "%"+termoBusca+"%")
+//	qb.Where("status IN (?)", sliceDeStatus) // Drivers sql geralmente expandem slices para '?, ?, ?'
+//
+// IMPORTANTE: Por segurança, use SEMPRE placeholders '?' para os valores
+// e passe os valores como argumentos em `args`. NÃO formate valores diretamente
+// na string `queryFragment` para evitar SQL Injection.
+func (qb *QueryBuilder) Where(queryFragment string, args ...any) *QueryBuilder {
+	// 1. Checa erro prévio
+	if qb.buildErr != nil {
+		return qb
+	}
+
+	// 2. Validações básicas
+	trimmedQuery := strings.TrimSpace(queryFragment)
+	if trimmedQuery == "" {
+		err := errors.New("Where: queryFragment não pode ser vazio")
+		qb.buildErr = err
+		fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return qb
+	}
+
+	// Opcional: Contar '?' e comparar com len(args)? Pode ser complexo e falhar
+	// em casos legítimos (ex: '?' dentro de strings literais na query).
+	// Deixaremos a validação de contagem de args para o driver do banco por enquanto.
+
+	// 3. Cria a struct da condição
+	condition := sqlCondition{
+		query: trimmedQuery,
+		args:  args,
+	}
+
+	// 4. Adiciona a condição à lista
+	qb.conditions = append(qb.conditions, condition)
+
+	// 5. Log informativo
+	// Cuidado ao logar args, podem conter dados sensíveis. Logar apenas a query?
+	// Ou logar os tipos dos args? Por enquanto, logamos a query e o número de args.
+	fmt.Printf("%s Condição WHERE adicionada: \"%s\" (Args: %d) [%s]\n", logPrefixInfo, trimmedQuery, len(args), time.Now().Format(time.RFC3339))
+
+	// 6. Retorna o builder
+	return qb
+}
+
+// TODO: Implementar OrWhere(...) para adicionar condições com OR.
