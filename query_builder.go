@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors" // Já vamos importar, pois usaremos para erros
 	"fmt"
+	"strings"
 	"time"
 
 	// Para formatação de erros
@@ -144,5 +145,80 @@ func (qb *QueryBuilder) Model(modelInstance interface{}) *QueryBuilder {
 	fmt.Printf("%s Modelo definido: %s (Tabela: %s) [%s]\n", logPrefixInfo, modelType.Name(), meta.TableName, time.Now().Format(time.RFC3339))
 
 	// 6. Retorna o builder
+	return qb
+}
+
+// Select define explicitamente quais colunas buscar do banco de dados.
+// Aceita nomes dos campos da struct Go como argumentos (ex: "ID", "NomeUsuario").
+// Se este método não for chamado, o builder buscará todas as colunas mapeadas
+// da entidade principal (`qb.entityMeta.Columns`) por padrão quando executar a query.
+// Chamar Select múltiplas vezes anexa as novas colunas às já selecionadas.
+// Ex: qb.Select("ID", "Nome").Select("Email") resulta em buscar as colunas de banco
+//
+//	correspondentes a ID, Nome e Email.
+func (qb *QueryBuilder) Select(goFieldNames ...string) *QueryBuilder {
+	// 1. Checa erro prévio na construção
+	if qb.buildErr != nil {
+		return qb
+	}
+
+	// 2. Garante que Model() foi chamado, pois precisamos dos metadados
+	if qb.entityMeta == nil {
+		err := errors.New("Select: Model() deve ser chamado antes de Select()")
+		qb.buildErr = err
+		fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+		return qb
+	}
+
+	// 3. Inicializa a slice `selectCols` na primeira chamada a `Select`.
+	// Se `selectCols` for `nil`, significa "selecionar todas as colunas".
+	// Se não for `nil`, significa "selecionar apenas as colunas nesta slice".
+	if qb.selectCols == nil {
+		qb.selectCols = make([]string, 0, len(goFieldNames))
+		// Log opcional indicando que a seleção explícita começou
+		// fmt.Printf("%s Iniciando seleção explícita de colunas para %s. [%s]\n", logPrefixInfo, qb.entityMeta.Name, time.Now().Format(time.RFC3339))
+	}
+
+	// 4. Itera sobre os nomes dos campos Go fornecidos
+	processedDbCols := make([]string, 0, len(goFieldNames)) // Para log no final
+	for _, fieldName := range goFieldNames {
+		// Validação básica do nome do campo
+		trimmedFieldName := strings.TrimSpace(fieldName)
+		if trimmedFieldName == "" {
+			err := errors.New("Select: nome do campo não pode ser vazio")
+			qb.buildErr = err
+			fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+			return qb // Para no primeiro erro
+		}
+
+		// 5. Busca o metadado da coluna usando o nome do campo Go
+		colMeta, ok := qb.entityMeta.ColumnsByName[trimmedFieldName]
+		if !ok {
+			// Erro: Campo não encontrado ou não é uma coluna mapeada.
+			// Damos uma mensagem um pouco melhor se for uma relação.
+			errMsg := ""
+			if _, isRelation := qb.entityMeta.RelationsByName[trimmedFieldName]; isRelation {
+				errMsg = fmt.Sprintf("Select: campo '%s' em %s é uma relação, não uma coluna. Use Preload() para carregar relações.", trimmedFieldName, qb.entityMeta.Name)
+			} else {
+				errMsg = fmt.Sprintf("Select: campo '%s' não encontrado ou não é uma coluna mapeada em %s", trimmedFieldName, qb.entityMeta.Name)
+			}
+			err := errors.New(errMsg)
+			qb.buildErr = err
+			fmt.Printf("%s %v [%s]\n", logPrefixError, err, time.Now().Format(time.RFC3339))
+			return qb // Para no primeiro erro
+		}
+
+		// 6. Sucesso! Adiciona o NOME DA COLUNA DO BANCO DE DADOS (`colMeta.ColumnName`)
+		//    à nossa slice `selectCols`.
+		qb.selectCols = append(qb.selectCols, colMeta.ColumnName)
+		processedDbCols = append(processedDbCols, colMeta.ColumnName) // Adiciona para o log
+	}
+
+	// Log informando quais colunas (nomes do DB) foram adicionadas nesta chamada
+	if len(processedDbCols) > 0 {
+		fmt.Printf("%s Colunas adicionadas ao SELECT: %v [%s]\n", logPrefixInfo, processedDbCols, time.Now().Format(time.RFC3339))
+	}
+
+	// 7. Retorna o builder para encadeamento
 	return qb
 }
