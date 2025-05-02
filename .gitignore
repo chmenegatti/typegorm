@@ -1,0 +1,23 @@
+# Binários compilados
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+typegorm # Binário da CLI
+
+# Arquivos de teste
+*.test
+
+# Arquivos de build e dependências
+/vendor/
+/build/
+
+# Arquivos de configuração local/sensíveis (exemplo)
+*.local.yaml
+.env
+
+# Arquivos de IDEs e SO
+.idea/
+.vscode/
+*.DS_Store

@@ -1,529 +1,333 @@
-# TypeGorm: Framework ORM para Go Inspirado no TypeORM
+# TypeGORM: Especificação e Documentação
 
-## 1. Introdução
+**Projeto:** [github.com/chmenegatti/typegorm](https://github.com/chmenegatti/typegorm)
 
-### Objetivo do Framework
-O **TypeGorm** visa simplificar e padronizar a interação com bancos de dados relacionais e NoSQL em aplicações Go. O objetivo principal é abstrair a complexidade das operações de banco de dados, permitindo que os desenvolvedores se concentrem na lógica de negócios, ao mesmo tempo que oferece flexibilidade e poder para lidar com cenários complexos.
+## Fase 0 – Definição e Arquitetura
 
-### Inspiração no TypeORM
-TypeGorm se inspira fortemente no [TypeORM](https://typeorm.io/) do ecossistema TypeScript/JavaScript. As características principais que buscamos emular incluem:
-* **Mapeamento Objeto-Relacional/Documento:** Definição de modelos de dados usando structs Go e metadados (via struct tags) para mapear para tabelas/coleções.
-* **Suporte a Múltiplos Bancos de Dados:** Flexibilidade para trabalhar com diferentes SGBDs (SQL e NoSQL) através de uma API unificada.
-* **Padrões Repository e Active Record (Opcional):** Oferecer diferentes maneiras de interagir com os dados.
-* **Query Builder Robusto:** Uma interface fluente para construir consultas SQL/NoSQL complexas de forma programática e segura.
-* **Gerenciamento de Relações:** Suporte explícito para relações OneToOne, OneToMany, ManyToOne e ManyToMany.
-* **Migrations:** Ferramentas para gerenciar a evolução do esquema do banco de dados.
-* **Transactions:** API para executar múltiplas operações atomicamente.
+Esta fase estabelece os fundamentos conceituais e técnicos do TypeGORM, delineando seus objetivos, escopo, estrutura e como ele se diferenciará no ecossistema Go.
 
-### Importância de um ORM
-Em Go, embora o pacote `database/sql` forneça uma base sólida, ele exige muito código repetitivo para operações CRUD, mapeamento de resultados e gerenciamento de conexões. Um ORM como o TypeGorm aumenta a produtividade ao:
-* **Reduzir Boilerplate:** Automatiza tarefas comuns de acesso a dados.
-* **Garantir Consistência:** Aplica padrões consistentes em toda a aplicação.
-* **Melhorar a Manutenibilidade:** Facilita a refatoração e a evolução do código de acesso a dados.
-* **Abstrair Diferenças de Banco de Dados:** Permite (até certo ponto) trocar de banco de dados com menos esforço.
-* **Prevenir Erros Comuns:** Ajuda a evitar vulnerabilidades como SQL Injection através de queries parametrizadas.
+## 1. Objetivo e Diferenciais do TypeGORM
 
-## 2. Estrutura do Projeto
+* **Objetivo Principal:** Criar um ORM (Object-Relational Mapper) para Go que ofereça uma experiência de desenvolvimento intuitiva e produtiva, inspirada na sintaxe e funcionalidades do TypeORM (TypeScript), ao mesmo tempo que aproveita a robustez e performance do ecossistema Go e lições aprendidas com ORMs como o GORM. O TypeGORM visa simplificar a interação com múltiplos tipos de bancos de dados (SQL e NoSQL) através de uma API unificada e baseada em *struct tags*.
+* **Diferenciais:**
+  * **API Unificada SQL/NoSQL:** Abstrair as diferenças fundamentais entre bancos relacionais e NoSQL, permitindo que o desenvolvedor utilize uma interface de consulta e manipulação de dados consistente (sempre que semanticamente possível).
+  * **Inspiração TypeORM:** Adotar uma abordagem baseada em *structs* e *tags* Go para definição de modelos, relacionamentos e validações, similar aos *decorators* do TypeORM, visando familiaridade e clareza.
+  * **Foco em Modularidade:** Arquitetura projetada para facilitar a adição de suporte a novos bancos de dados (dialetos) sem impactar o *core* do ORM.
+  * **Experiência do Desenvolvedor (DX):** Priorizar uma API simples, documentação clara, exemplos práticos e uma CLI útil para tarefas comuns como *migrations*.
+  * **Performance e Escalabilidade:** Construído em Go, aproveitando suas características de concorrência e tipagem estática, com foco em otimizações e gerenciamento eficiente de conexões.
 
-O código do TypeGorm será organizado em pacotes modulares para clareza e manutenibilidade. Uma estrutura de diretórios sugerida seria:
+## 2. Requisitos Funcionais e Não Funcionais
 
+* **Requisitos Funcionais (RF):**
+  * (RF01) Suporte a operações CRUD (Create, Read, Update, Delete) básicas.
+  * (RF02) Mapeamento de *structs* Go para tabelas (SQL) ou coleções (NoSQL) usando *tags*.
+  * (RF03) Suporte aos relacionamentos: OneToOne, OneToMany, ManyToOne, ManyToMany.
+  * (RF04) Construção de queries complexas (filtros `WHERE`, `ORDER BY`, `LIMIT`, `OFFSET`, `GROUP BY`, `JOINs` - onde aplicável).
+  * (RF05) Suporte a transações atômicas (para bancos de dados que suportam).
+  * (RF06) Implementação de *Hooks* (Callbacks) para eventos do ciclo de vida (ex: BeforeSave, AfterUpdate).
+  * (RF07) Sistema de *Migrations* gerenciado via CLI (criar, aplicar, reverter, verificar status).
+  * (RF08) Validação de dados embutida nos modelos (usando *tags* ou métodos).
+  * (RF09) Suporte aos bancos SQL: MariaDB/MySQL, SQL Server, Oracle, SQLite.
+  * (RF10) Suporte aos bancos NoSQL: MongoDB, Redis (com casos de uso específicos, como caching ou armazenamento de objetos simples).
+  * (RF11) Interface de Linha de Comando (CLI) para gerenciamento de *migrations*.
+
+* **Requisitos Não Funcionais (RNF):**
+  * (RNF01) **Performance:** O ORM deve ter baixo *overhead* e executar queries eficientemente.
+  * (RNF02) **Escalabilidade:** Capaz de lidar com um grande número de conexões e alto volume de dados.
+  * (RNF03) **Robustez:** Tratamento adequado de erros, conexões resilientes (*connection pooling*).
+  * (RNF04) **Usabilidade:** API intuitiva e fácil de aprender/usar.
+  * (RNF05) **Documentação:** Completa, clara e com exemplos práticos.
+  * (RNF06) **Testabilidade:** Código com alta cobertura de testes unitários e de integração.
+  * (RNF07) **Modularidade:** Arquitetura extensível para novos dialetos e funcionalidades.
+  * (RNF08) **Manutenibilidade:** Código limpo, seguindo princípios KISS, DRY, SOLID.
+  * (RNF09) **Segurança:** Prevenção contra *SQL Injection* através do uso de queries parametrizadas.
+  * (RNF10) **Adesão a Princípios:** Implementação seguindo TDD e conceitos de DDD onde aplicável.
+
+## 3. Arquitetura Geral
+
+A arquitetura será baseada em camadas e módulos para promover separação de responsabilidades e modularidade:
+
+* **Camada de Apresentação/Interface:**
+  * **API Pública do ORM:** Interfaces e *structs* que os desenvolvedores usarão em suas aplicações Go.
+  * **CLI (`cmd/typegorm`):** Ferramenta de linha de comando para interações, principalmente *migrations*.
+* **Camada Core/Lógica de Negócio:**
+  * **ORM Core (`pkg/core`):** Gerencia sessões, unidades de trabalho (Unit of Work), mapeamento objeto-relacional/documento, execução de hooks e validações.
+  * **Schema Builder (`pkg/schema`):** Analisa *structs* e *tags* para construir representações internas dos modelos e seus relacionamentos.
+  * **Query Builder (`pkg/querybuilder`):** Fornece uma API fluente para construir queries SQL e operações NoSQL de forma abstrata.
+  * **Migration Engine (`pkg/migration`):** Lógica para executar, reverter e gerenciar o estado das *migrations*.
+* **Camada de Abstração de Dados:**
+  * **Interface de Dialeto (`pkg/dialects/common`):** Define contratos (`DataSource`, `Connection`, `Dialect`, `Transaction`, etc.) que cada driver de banco de dados deve implementar. Essa interface abstrai as particularidades de cada SGBD.
+* **Camada de Drivers/Dialetos (`pkg/dialects/*`):**
+  * **Implementações Específicas:** Módulos separados para cada banco de dados suportado (ex: `mysql`, `mongodb`). Cada módulo implementa as interfaces da camada de abstração, traduzindo as operações genéricas do ORM para a sintaxe específica do banco.
+
+```mermaid
+graph TD
+    A[Aplicação do Usuário] --> B(API Pública TypeGORM);
+    C[CLI TypeGORM] --> B;
+    B --> D{ORM Core};
+    D --> E[Schema Builder];
+    D --> F[Query Builder];
+    D --> G[Migration Engine];
+    D --> H{Interface de Dialeto};
+    F --> H;
+    G --> H;
+    H --> I[Driver MySQL];
+    H --> J[Driver PostgreSQL];
+    H --> K[Driver SQLite];
+    H --> L[Driver SQL Server];
+    H --> M[Driver Oracle];
+    H --> N[Driver MongoDB];
+    H --> O[Driver Redis];
+    I --> P[(MariaDB/MySQL)];
+    J --> Q[(PostgreSQL)];
+    K --> R[(SQLite)];
+    L --> S[(SQL Server)];
+    M --> T[(Oracle)];
+    N --> U[(MongoDB)];
+    O --> V[(Redis)];
+
+    style P fill:#f9f,stroke:#333,stroke-width:2px
+    style Q fill:#f9f,stroke:#333,stroke-width:2px
+    style R fill:#f9f,stroke:#333,stroke-width:2px
+    style S fill:#f9f,stroke:#333,stroke-width:2px
+    style T fill:#f9f,stroke:#333,stroke-width:2px
+    style U fill:#ccf,stroke:#333,stroke-width:2px
+    style V fill:#ccf,stroke:#333,stroke-width:2px
 ```
+
+(Diagrama simplificado: PostgreSQL incluído para exemplo, embora não listado inicialmente nos requisitos SQL)
+
+## 4. Suporte Multiplataforma (SQL/NoSQL) e Estratégia de Abstração
+
+* **Abstração Central:** A chave é a interface `Dialect` e interfaces relacionadas (`Connection`, `QueryExecutor`, etc.) em `pkg/dialects/common`. O *core* do ORM interagirá exclusivamente com essas interfaces.
+* **Implementações Específicas:** Cada driver (ex: `pkg/dialects/mysql`, `pkg/dialects/mongodb`) implementará essas interfaces.
+  * **SQL:** Implementará a geração de SQL padrão ANSI com variações específicas do dialeto (citação de identificadores, tipos de dados, sintaxe de `LIMIT`/`OFFSET`, etc.). Utilizará o pacote `database/sql` do Go internamente.
+  * **NoSQL (MongoDB):** Implementará as operações usando o driver oficial do MongoDB para Go. Mapeará as operações do Query Builder para comandos BSON e chamadas da API do driver Mongo. Relacionamentos podem ser suportados via *embedding* ou referências (`ObjectID`).
+  * **NoSQL (Redis):** O suporte será mais focado, provavelmente para operações de chave-valor simples, caching de objetos/queries, ou estruturas de dados básicas (Hashes, Lists). A interface `Dialect` terá métodos opcionais ou específicos que o driver Redis implementará.
+* **Tradução:** O `QueryBuilder` gerará uma representação interna abstrata da query/operação. O `Dialect` específico será responsável por traduzir essa representação para a linguagem nativa do banco (SQL, MQL, comandos Redis).
+* **Capacidades:** A interface `Dialect` poderá expor métodos para verificar as capacidades do banco (ex: `SupportsTransactions()`, `SupportsJSON()` ), permitindo que o *core* do ORM adapte seu comportamento.
+
+## 5. Estrutura do Repositório
+
+A estrutura de diretórios seguirá as convenções da comunidade Go, promovendo clareza e manutenibilidade:
+
+```text
 typegorm/
-├── connection/       # Gerenciamento de conexões e pooling
-│   ├── manager.go
-│   └── pool.go
-├── dialect/          # Lógica específica de cada banco de dados (SQL variants, query syntax)
-│   ├── mysql.go
-│   ├── postgres.go
-│   ├── sqlite.go
-│   ├── oracle.go
-│   └── common.go     # Interfaces e lógicas comuns
-├── driver/           # Adapters para os drivers de banco de dados Go
-│   ├── mysql/
-│   ├── postgres/
-│   ├── mongo/
-│   ├── oracle/
-│   ├── sqlite/
-│   └── redis/
-├── entity/           # Reflexão, parsing de struct tags, metadados de entidades
-│   ├── metadata.go
-│   └── parser.go
-├── migration/        # Ferramentas e execução de migrações
-│   ├── cli/          # (Opcional) Ferramenta de linha de comando
-│   ├── migration.go
-│   └── runner.go
-├── querybuilder/     # Implementação do Query Builder fluente
-│   ├── builder.go
-│   ├── expression.go # Representação de expressões (WHERE, JOIN, etc.)
-│   └── result.go     # Processamento de resultados
-├── repository/       # Implementação do padrão Repository (Data Mapper)
-│   └── repository.go
-├── schema/           # Construção e sincronização de esquemas
-│   ├── builder.go
-│   └── sync.go
-├── transaction/      # Gerenciamento de transações
-│   └── transaction.go
-├── typegorm.go       # Ponto de entrada principal da API
-├── error.go          # Definições de erros customizados
-└── go.mod
-└── go.sum
+├── cmd/
+│   └── typegorm/       # Código-fonte da CLI
+├── pkg/                # Pacotes públicos reutilizáveis (API principal)
+│   ├── config/         # Leitura e validação de configurações
+│   ├── core/           # Lógica central do ORM (Session, UnitOfWork)
+│   ├── dialects/       # Abstrações e implementações dos drivers (dialetos)
+│   │   ├── common/     # Interfaces comuns (DataSource, Connection, Dialect)
+│   │   ├── mysql/      # Driver MariaDB/MySQL
+│   │   ├── sqlserver/  # Driver SQL Server
+│   │   ├── oracle/     # Driver Oracle (pode exigir CGO/drivers específicos)
+│   │   ├── sqlite/     # Driver SQLite
+│   │   ├── mongodb/    # Driver MongoDB
+│   │   └── redis/      # Driver Redis
+│   ├── errors/         # Erros customizados do TypeGORM
+│   ├── hooks/          # Definição e execução de hooks
+│   ├── migration/      # Lógica e interface para migrations
+│   ├── querybuilder/   # Construção de queries/operações
+│   ├── schema/         # Análise de structs, tags e construção de schema
+│   └── validation/     # Lógica de validação (integrada ou via lib externa)
+├── internal/           # Pacotes privados (detalhes de implementação não exportados)
+│   └── ...             # Helpers, utilitários internos
+├── examples/           # Projetos de exemplo completos para cada DB
+├── docs/               # Arquivos de documentação (Markdown, etc.)
+├── test/               # Testes de integração e E2E (podem usar Docker/Testcontainers)
+├── .github/            # Configurações do GitHub (Actions para CI/CD, issue templates)
+├── .gitignore
+├── go.mod              # Definição do módulo Go e dependências
+├── go.sum
+└── README.md           # Visão geral, instalação, quick start
 ```
 
-### Arquitetura Geral
-A arquitetura se baseará em:
-1.  **Camada de Conexão:** Abstrai a configuração e o gerenciamento de conexões para diferentes bancos.
-2.  **Dialetos/Drivers:** Adapta a sintaxe e o comportamento específico de cada banco de dados. Usa drivers Go subjacentes (ex: `go-sql-driver/mysql`, `pgx`, `mongo-go-driver`, `godror`, `go-sqlite3`, `go-redis/redis`).
-3.  **Metadados de Entidade:** Usa reflexão e struct tags para entender como mapear structs Go para o banco de dados.
-4.  **Executor de Consultas:** Responsável por traduzir operações (CRUD, Query Builder) em comandos SQL/NoSQL e executá-los.
-5.  **Query Builder:** Oferece uma API fluente para construir consultas complexas.
-6.  **Gerenciador de Migração:** Compara o estado do modelo com o esquema do banco e gera/aplica migrações.
+* **`pkg/` vs `internal/`:** Usaremos `pkg/` para a API pública que os usuários importarão e `internal/` para detalhes de implementação que não devem ser importados diretamente por outros projetos, garantindo maior controle sobre a API exposta.
 
-## 3. Conexão com Bancos de Dados
+## 6. Integração e Uso em Projetos de Terceiros
 
-O TypeGorm fornecerá uma API unificada para configurar conexões.
+* **Instalação:** Desenvolvedores instalarão o TypeGORM como qualquer módulo Go:
+
+    ```bash
+    go get github.com/chmenegatti/typegorm
+    ```
+
+* **Uso Básico:**
 
 ```go
 package main
 
 import (
     "log"
-    "github.com/your-repo/typegorm" // Caminho hipotético
-    "github.com/your-repo/typegorm/driver/mysql"
-    "github.com/your-repo/typegorm/driver/postgres"
-    "github.com/your-repo/typegorm/driver/mongo"
-    "github.com/your-repo/typegorm/driver/oracle"
-    "github.com/your-repo/typegorm/driver/sqlite"
-    "github.com/your-repo/typegorm/driver/redis"
+
+    "github.com/chmenegatti/typegorm"
+    "github.com/chmenegatti/typegorm/pkg/config"
+    _ "github.com/chmenegatti/typegorm/pkg/dialects/sqlite" // Importar o driver desejado
 )
 
+// Definir o modelo
+type User struct {
+    ID   uint   `typegorm:"primaryKey"`
+    Name string `typegorm:"column:user_name;size:255;not null"`
+    Age  int
+}
+
 func main() {
-    // Exemplo MySQL/MariaDB
-    mysqlConn, err := typegorm.Connect(mysql.Config{
-        Host:     "localhost",
-        Port:     3306,
-        Username: "user",
-        Password: "password",
-        Database: "my_db",
-        Options: map[string]string{
-            "parseTime": "true",
+    // 1. Configurar a conexão
+    cfg := config.Config{
+        Dialect: "sqlite",
+        DSN:     "file:test.db?cache=shared&_pragma=foreign_keys(1)", // Exemplo DSN SQLite
+        // Outras opções: LogLevel, PoolSize, etc.
+    }
+
+    // 2. Abrir a conexão (DataSource)
+    ds, err := typegorm.Open(cfg)
+    if err != nil {
+        log.Fatalf("Falha ao conectar ao banco: %v", err)
+    }
+    defer ds.Close() // Não esquecer de fechar
+
+    // Opcional: AutoMigrate (cria/atualiza tabelas)
+    err = ds.AutoMigrate(&User{})
+    if err != nil {
+        log.Fatalf("Falha ao executar AutoMigrate: %v", err)
+    }
+
+    // 3. Realizar operações
+    newUser := User{Name: "Alice", Age: 30}
+    result := ds.Create(&newUser) // ds ou uma sessão/transação
+    if result.Error != nil {
+        log.Printf("Erro ao criar usuário: %v", result.Error)
+    } else {
+        log.Printf("Usuário criado com ID: %d", newUser.ID)
+    }
+
+    // Ler usuário
+    var user User
+    result = ds.First(&user, "user_name = ?", "Alice")
+    if result.Error != nil {
+          log.Printf("Erro ao buscar usuário: %v", result.Error)
+    } else {
+        log.Printf("Usuário encontrado: %+v", user)
+    }
+}
+```
+
+## 7. Padrão de Configuração
+
+Oferecer flexibilidade na configuração:
+
+* **Struct Go (`config.Config`):** Configuração programática, ideal para testes e cenários simples.
+* **Arquivo de Configuração:** Suporte a arquivos YAML (preferencial), JSON ou TOML. A CLI e a aplicação podem carregar a configuração de um arquivo (ex: `typegorm.yaml`).
+
+    ```yaml
+    # Exemplo typegorm.yaml
+    database:
+      dialect: mysql
+      dsn: "user:password@tcp(127.0.0.1:3306)/dbname?charset=utf8mb4&parseTime=True&loc=Local"
+      pool:
+        maxIdleConns: 10
+        maxOpenConns: 100
+        connMaxLifetime: 3600 # segundos
+    logging:
+      level: info # debug, info, warn, error
+      format: text # json
+    migration:
+      directory: "migrations" # Diretório para arquivos de migration
+    ```
+
+* **Variáveis de Ambiente:** Permitir sobrescrever configurações do arquivo/struct via variáveis de ambiente (ex: `TYPEGORM_DATABASE_DSN`, `TYPEGORM_LOGGING_LEVEL`). Útil para deployments (Docker, Kubernetes).
+* **Precedência:** Variáveis de Ambiente > Arquivo de Configuração > Configuração via Struct > Defaults.
+
+## 8. Funcionamento da CLI para Migrations
+
+* **Integração:** A CLI (`cmd/typegorm`) utilizará os pacotes `pkg/config` e `pkg/migration` do próprio ORM. Ela lerá a configuração (arquivo ou env vars) para saber a qual banco se conectar e qual dialeto usar.
+* **Comandos Principais:**
+  * `typegorm migrate create <migration_name>`: Cria um novo arquivo de migration (ex: `migrations/YYYYMMDDHHMMSS_migration_name.go`) com *placeholders* para as funções `Up` e `Down`.
+  * `typegorm migrate up`: Aplica todas as migrations pendentes. Registra as migrations aplicadas em uma tabela de controle no banco (ex: `schema_migrations`).
+  * `typegorm migrate down [steps]`: Reverte a última migration aplicada ou um número `[steps]` de migrations. Remove o registro da tabela de controle.
+  * `typegorm migrate status`: Mostra o status de cada migration (aplicada ou pendente).
+* **Formato das Migrations:** Arquivos Go são preferíveis, pois permitem lógica complexa, uso de helpers do ORM e independência do banco (se o ORM abstrair DDL). Alternativamente, pode suportar arquivos `.sql` para DDL puro.
+
+```go
+// Exemplo: migrations/20250502082000_create_users_table.go
+package migrations
+
+import "github.com/chmenegatti/typegorm/pkg/migration"
+
+func init() {
+    migration.Register(migration.Migration{
+        ID: "20250502082000",
+        Up: func(tx migration.SQLExecutor) error {
+            // Usar tx.Exec() para SQL bruto ou helpers do SchemaBuilder (se disponíveis)
+            _, err := tx.Exec(`
+                CREATE TABLE users (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_name VARCHAR(255) NOT NULL,
+                    age INT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                );
+            `)
+            return err
+        },
+        Down: func(tx migration.SQLExecutor) error {
+            _, err := tx.Exec(`DROP TABLE users;`)
+            return err
         },
     })
-    if err != nil { log.Fatal(err) }
-    defer mysqlConn.Close()
-
-    // Exemplo PostgreSQL
-    pgConn, err := typegorm.Connect(postgres.Config{
-        Host:     "localhost",
-        Port:     5432,
-        Username: "user",
-        Password: "password",
-        Database: "my_db",
-        SSLMode:  "disable",
-    })
-    // ...
-
-    // Exemplo MongoDB
-    mongoConn, err := typegorm.Connect(mongo.Config{
-        URI: "mongodb://user:password@localhost:27017/my_db?authSource=admin",
-    })
-    // ...
-
-     // Exemplo Oracle
-    oracleConn, err := typegorm.Connect(oracle.Config{
-         Username: "user",
-         Password: "password",
-         ConnectString: "localhost:1521/ORCL", // Exemplo de connect string
-     })
-    // ...
-
-    // Exemplo SQLite
-    sqliteConn, err := typegorm.Connect(sqlite.Config{
-        Database: "./my_app.db",
-    })
-    // ...
-
-    // Exemplo Redis
-    redisConn, err := typegorm.Connect(redis.Config{
-        Addr:     "localhost:6379",
-        Password: "", // Sem senha
-        DB:       0,  // Banco de dados padrão
-    })
-    // ...
-
-
-    // Gerenciamento de Conexões e Pooling
-    // Para bancos SQL, o TypeGorm utilizará o pooling de conexões
-    // integrado do `database/sql`. Para NoSQL (Mongo, Redis),
-    // os drivers subjacentes geralmente gerenciam seus próprios pools.
-    // A configuração pode permitir ajustar tamanhos de pool (MaxOpenConns, MaxIdleConns).
 }
 ```
 
-### Gerenciamento de Conexões
-* A função `typegorm.Connect` retorna uma interface `DataSource` ou similar.
-* Implementa pooling (especialmente para SQL DBs usando `database/sql.DB`).
-* Permite configurar timeouts, número máximo de conexões, etc.
-* Gerencia a lógica de reconexão (opcionalmente).
+* **Tabela de Controle:** A CLI gerenciará uma tabela (ex: `schema_migrations`) com pelo menos uma coluna (ex: `version` ou `id`) para rastrear quais migrations foram aplicadas. Para NoSQL, uma coleção equivalente será usada.
 
-## 4. Operações CRUD
+## 9. Estratégia para Documentação, Exemplos e Testes
 
-O TypeGorm oferecerá interfaces para operações básicas, provavelmente através de um `Repository` ou diretamente via `DataSource`.
-
-```go
-package main
-
-import (
-    "context"
-    "time"
-    "github.com/your-repo/typegorm"
-)
-
-type User struct {
-    ID        uint      `typegorm:"primaryKey;autoIncrement"`
-    Name      string    `typegorm:"column:user_name;unique"`
-    Email     string    `typegorm:"unique"`
-    CreatedAt time.Time `typegorm:"createdAt"`
-    UpdatedAt time.Time `typegorm:"updatedAt"`
-}
-
-func main() {
-    db := /* obter DataSource de typegorm.Connect */
-    userRepo := typegorm.GetRepository[User](db) // Usando Generics (Go 1.18+)
-
-    ctx := context.Background()
-
-    // CREATE
-    newUser := User{Name: "Alice", Email: "alice@example.com"}
-    err := userRepo.Save(ctx, &newUser) // Save pode fazer Insert ou Update
-    // Ou: err := userRepo.Insert(ctx, &newUser)
-    if err != nil { /* handle error */ }
-    // newUser.ID agora está preenchido (se autoIncrement)
-
-    // READ (Find One)
-    foundUser, err := userRepo.FindOne(ctx, typegorm.Where{"Email = ?": "alice@example.com"})
-    if err != nil { /* handle error */ }
-    log.Printf("Found: %+v\n", foundUser)
-
-    // READ (Find Multiple)
-    allUsers, err := userRepo.Find(ctx, typegorm.FindOptions{
-        Where: typegorm.Where{"Name LIKE ?": "A%"},
-        Order: "CreatedAt DESC",
-        Limit: 10,
-        Offset: 0,
-    })
-    if err != nil { /* handle error */ }
-
-    // UPDATE
-    foundUser.Name = "Alice Smith"
-    err = userRepo.Save(ctx, foundUser) // Save detecta a chave primária e faz Update
-    // Ou: result, err := userRepo.Update(ctx, typegorm.Where{"ID = ?": foundUser.ID}, map[string]interface{}{"Name": "Alice Smith"})
-    if err != nil { /* handle error */ }
-
-    // DELETE
-    err = userRepo.Delete(ctx, foundUser) // Deleta pelo objeto (usando PK)
-    // Ou: result, err := userRepo.Delete(ctx, typegorm.Where{"Email = ?": "alice@example.com"})
-    if err != nil { /* handle error */ }
-}
-```
-
-## 5. Suporte a Comandos SQL/Query Builder
-
-### Query Builder
-Uma API fluente para construir consultas complexas de forma segura e legível.
-
-```go
-package main
-
-import (
-    "context"
-    "github.com/your-repo/typegorm"
-)
-
-type Post struct {
-    ID      uint   `typegorm:"primaryKey"`
-    Title   string
-    UserID  uint
-    User    User `typegorm:"relation:many-to-one;joinColumn:user_id"` // Relação
-}
-// User struct definida como antes...
-
-func main() {
-    db := /* obter DataSource */
-    ctx := context.Background()
-    var results []struct { // Resultado customizado
-        UserName string `db:"user_name"`
-        PostCount int   `db:"post_count"`
-    }
-
-    // Exemplo de Query Builder
-    qb := typegorm.GetQueryBuilder[User](db) // Ou db.QueryBuilder()
-
-    err := qb.Select("u.user_name", "COUNT(p.id) as post_count").
-        From("users", "u"). // Alias 'u'
-        InnerJoin("posts", "p", "u.id = p.user_id"). // InnerJoin(tabela, alias, condição)
-        Where("u.user_name LIKE ?", "A%").
-        GroupBy("u.id", "u.user_name").
-        Having("COUNT(p.id) > ?", 1).
-        OrderBy("post_count", "DESC").
-        Limit(10).
-        Offset(0).
-        Scan(ctx, &results) // Executa a query e mapeia para a struct
-
-    if err != nil { /* handle error */ }
-    log.Printf("Query Results: %+v\n", results)
-
-    // Query parametrizada é implícita no Where, Having, etc.
-    // Valores são passados separadamente para o driver, prevenindo SQL Injection.
-}
-```
-
-### Transactions
-Suporte para agrupar operações atomicamente.
-
-```go
-package main
-
-import (
-    "context"
-    "errors"
-    "github.com/your-repo/typegorm"
-)
-// User, Post structs ...
-
-func main() {
-    db := /* obter DataSource */
-    ctx := context.Background()
-    userRepo := typegorm.GetRepository[User](db)
-    postRepo := typegorm.GetRepository[Post](db)
-
-    err := db.Transaction(ctx, func(tx typegorm.TransactionManager) error {
-        // Obter repositórios que operam dentro da transação
-        txUserRepo := typegorm.GetRepository[User](tx)
-        txPostRepo := typegorm.GetRepository[Post](tx)
-
-        // Operação 1
-        newUser := User{Name: "Bob", Email: "bob@example.com"}
-        if err := txUserRepo.Save(ctx, &newUser); err != nil {
-            return err // Retornar erro causa rollback
-        }
-
-        // Operação 2
-        newPost := Post{Title: "Bob's First Post", UserID: newUser.ID}
-        if err := txPostRepo.Save(ctx, &newPost); err != nil {
-            return err // Rollback
-        }
-
-        // Simular um erro para causar rollback
-        // if true { return errors.New("simulated error during transaction") }
-
-        return nil // Retornar nil causa commit
-    })
-
-    if err != nil {
-        log.Printf("Transaction failed: %v", err) // Transação sofreu rollback
-    } else {
-        log.Println("Transaction successful!") // Transação commitada
-    }
-}
-```
-
-## 6. Mapeamento e Models
-
-A definição de modelos usa structs Go e struct tags `typegorm`.
-
-```go
-package model
-
-import (
-    "time"
-    "github.com/your-repo/typegorm/types" // Pacote para tipos customizados (ex: JSON)
-)
-
-type Profile struct {
-    ID     uint   `typegorm:"primaryKey"`
-    Bio    string `typegorm:"type:text"`
-    UserID uint   // Chave estrangeira implícita ou explícita
-}
-
-type User struct {
-    ID        uint      `typegorm:"primaryKey;autoIncrement"` // Chave primária, auto-incremento
-    Name      string    `typegorm:"column:full_name;size:100;not null"` // Nome da coluna, tamanho, não nulo
-    Email     string    `typegorm:"unique;index:user_email_idx"` // Índice único e nomeado
-    Age       int       `typegorm:"default:18"` // Valor padrão
-    IsActive  bool      `typegorm:"default:true"`
-    Metadata  types.JSON `typegorm:"type:jsonb"` // Suporte a JSON/JSONB (depende do DB)
-    CreatedAt time.Time `typegorm:"createdAt"` // Timestamp de criação automático
-    UpdatedAt time.Time `typegorm:"updatedAt"` // Timestamp de atualização automático
-
-    // Relações
-    Profile   *Profile `typegorm:"relation:one-to-one;joinColumn:profile_id;reference:id"` // Relação 1:1
-    Posts     []*Post  `typegorm:"relation:one-to-many;mappedBy:User"` // Relação 1:N (lado "um")
-    Groups    []*Group `typegorm:"relation:many-to-many;joinTable:user_groups"` // Relação N:N
-}
-
-type Post struct {
-    ID        uint      `typegorm:"primaryKey"`
-    Title     string
-    Content   string    `typegorm:"type:text"`
-    UserID    uint      // Chave estrangeira para User
-    User      *User     `typegorm:"relation:many-to-one;joinColumn:user_id"` // Relação N:1 (lado "muitos")
-    CreatedAt time.Time `typegorm:"createdAt"`
-}
-
-type Group struct {
-    ID    uint   `typegorm:"primaryKey"`
-    Name  string `typegorm:"unique"`
-    Users []*User `typegorm:"relation:many-to-many;mappedBy:Groups"` // Lado inverso do N:N
-}
-
-// Tabela de junção para User <-> Group (pode ser gerada automaticamente)
-// type UserGroups struct {
-//     UserID  uint `typegorm:"primaryKey"`
-//     GroupID uint `typegorm:"primaryKey"`
-// }
-```
-
-### Tags Comuns:
-* `primaryKey`: Marca o campo como chave primária.
-* `autoIncrement`: Indica que a chave primária é auto-incrementada pelo banco.
-* `column:<nome>`: Especifica o nome da coluna no banco.
-* `type:<tipo>`: Especifica o tipo de dado no banco (ex: `varchar(100)`, `text`, `jsonb`, `timestamp`).
-* `size:<tamanho>`: Para tipos como `varchar`.
-* `unique`: Define uma restrição UNIQUE.
-* `index` / `index:<nome>`: Cria um índice simples ou nomeado.
-* `not null`: Define uma restrição NOT NULL.
-* `default:<valor>`: Define um valor padrão para a coluna.
-* `createdAt`, `updatedAt`: Campos especiais para timestamps automáticos.
-* `relation:<tipo>`: Define o tipo de relação (`one-to-one`, `one-to-many`, `many-to-one`, `many-to-many`).
-* `joinColumn:<fk_coluna>`: Especifica a coluna da chave estrangeira (em relações *ToOne).
-* `joinTable:<tabela_juncao>`: Especifica a tabela de junção (em relações ManyToMany).
-* `mappedBy:<campo_remoto>`: Indica o campo na entidade relacionada que mapeia de volta (em OneToMany, ManyToMany inverso).
-* `reference:<col_ref>`: Coluna referenciada pela FK (geralmente a PK remota).
-* `onDelete:<acao>`, `onUpdate:<acao>`: Define ações referenciais (CASCADE, SET NULL, etc.).
-
-## 7. Ferramentas de Migração
-
-Um componente crucial para gerenciar mudanças no esquema do banco de dados.
-
-### Funcionalidades:
-1.  **Geração de Migração:**
-    * Comando CLI: `typegorm migration:generate -n CreateUserTable`
-    * Compara as entidades Go definidas com o estado atual do banco de dados (ou a última migração).
-    * Gera um arquivo de migração (ex: `migrations/1678886400_CreateUserTable.go`).
-    * O arquivo contém funções `Up()` e `Down()` com código Go para executar SQL DDL (ou usando um Schema Builder do ORM).
-    ```go
-    // migrations/1678886400_CreateUserTable.go
-    package migrations
-
-    import "github.com/your-repo/typegorm/migration"
-
-    func init() {
-        migration.Register(1678886400, "CreateUserTable", Up_1678886400, Down_1678886400)
-    }
-
-    func Up_1678886400(runner migration.Runner) error {
-        return runner.Exec(`
-            CREATE TABLE users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                full_name VARCHAR(100) NOT NULL,
-                email VARCHAR(255) UNIQUE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            );
-        `)
-        // Ou usando um Schema Builder:
-        // return runner.SchemaBuilder().CreateTable("users", func(table schema.Table) {
-        //     table.Increments("id").Primary()
-        //     table.String("full_name", 100).NotNull()
-        //     table.String("email").Unique()
-        //     table.Timestamps()
-        // })
-    }
-
-    func Down_1678886400(runner migration.Runner) error {
-        return runner.Exec(`DROP TABLE users;`)
-        // Ou: return runner.SchemaBuilder().DropTable("users")
-    }
-    ```
-2.  **Execução de Migração:**
-    * Comando CLI: `typegorm migration:run` (aplica todas as pendentes) ou `typegorm migration:up`
-    * Executa as funções `Up()` das migrações pendentes em ordem.
-    * Registra as migrações executadas em uma tabela especial no banco (ex: `typegorm_migrations`).
-3.  **Reversão de Migração:**
-    * Comando CLI: `typegorm migration:revert` (reverte a última) ou `typegorm migration:down`
-    * Executa a função `Down()` da última migração aplicada.
-    * Remove o registro da migração da tabela de controle.
-
-## 8. Considerações de Desempenho
-
-* **Consultas Otimizadas:** O Query Builder deve gerar SQL eficiente. Evitar `SELECT *` por padrão; permitir seleção explícita de colunas.
-* **Indexação:** Facilitar a definição de índices via struct tags. A ferramenta de migração deve criar/remover índices.
-* **Lazy Loading vs Eager Loading:**
-    * **Lazy Loading:** Relações não são carregadas até serem acessadas explicitamente. Requer consultas adicionais (problema N+1 se não for cuidadoso).
-    * **Eager Loading:** Relações são carregadas junto com a entidade principal usando JOINs. Configurar via Query Builder ou tags.
-    * TypeGorm deve suportar ambos os modos, com Eager Loading sendo preferível para evitar N+1 quando os dados relacionados são sempre necessários.
-* **Caching:** Possibilidade de adicionar uma camada de cache (ex: Redis) para consultas frequentes ou entidades. Isso pode ser um módulo separado ou integrado.
-* **Batching:** Suporte para operações em lote (Bulk Insert/Update/Delete) para melhor performance em grandes volumes de dados.
-* **Pooling de Conexões:** Configuração adequada do pool de conexões é vital.
-* **Benchmarking:** O projeto deve incluir benchmarks (`testing` B*) para operações chave (CRUD, queries complexas) em diferentes bancos de dados suportados. Ferramentas de profiling (pprof) devem ser usadas para identificar gargalos.
-
-## 9. Documentação e Exemplos
-
-* **Documentação `godoc`:** Todos os pacotes e funções públicas devem ter comentários claros e completos seguindo o padrão `godoc`.
-* **Website de Documentação:** (Recomendado) Um site dedicado (usando Hugo, MkDocs, Docusaurus) com:
-    * Guia de Início Rápido.
-    * Tutoriais detalhados (configuração, CRUD, relações, query builder, migrações).
-    * Referência completa da API (tags, funções, interfaces).
-    * Explicação de conceitos (Lazy/Eager Loading, Transactions).
+* **Documentação:**
+  * **README.md:** Guia rápido de instalação, configuração básica e exemplos simples de CRUD. Link para documentação completa.
+  * **Godoc:** Comentários detalhados no código para gerar documentação automática da API.
+  * **Site de Documentação (Opcional, mas recomendado):** Usar um gerador de site estático (Hugo, MkDocs, Docusaurus) hospedado no GitHub Pages. Conterá:
+    * Guias de introdução e conceitos.
+    * Documentação detalhada de cada funcionalidade (Models, CRUD, Relations, Query Builder, Migrations, Hooks, Config).
+    * API Reference (pode ser gerada a partir do Godoc).
     * Guias específicos por banco de dados.
-* **Repositório de Exemplos:** Uma pasta `/examples` no repositório com projetos Go pequenos e funcionais demonstrando o uso do TypeGorm em diferentes cenários.
-
-## 10. Considerações Finais
-
-### Benefícios do TypeGorm
-* **Produtividade Acelerada:** Reduz drasticamente o código necessário para interagir com bancos de dados em Go.
-* **Código Mais Legível e Manutenível:** Abstrai SQL e lógica de mapeamento.
-* **Segurança:** Prevenção de SQL Injection através de parametrização automática.
-* **Flexibilidade:** Suporte a múltiplos bancos de dados SQL e NoSQL populares.
-* **Ecossistema Familiar:** A inspiração no TypeORM pode facilitar a adoção por desenvolvedores vindos do mundo Node.js/TypeScript.
-* **Tipagem Forte:** Aproveita o sistema de tipos do Go para segurança em tempo de compilação (embora a reflexão introduza alguma dinâmica).
-
-### Visão para Futuras Melhorias
-* **Suporte a Mais Bancos de Dados:** Adicionar suporte para SQL Server, CockroachDB, etc.
-* **Melhorias no Query Builder:** Funções de janela, CTEs (Common Table Expressions).
-* **Eventos/Hooks:** Permitir interceptar operações (BeforeInsert, AfterUpdate, etc.).
-* **Soft Deletes:** Suporte nativo para exclusão lógica (marcar como deletado em vez de remover).
-* **Replicação Read/Write:** Suporte para configurar conexões separadas para leitura e escrita.
-* **Integração com Observabilidade:** Métricas (Prometheus), Tracing (OpenTelemetry).
-* **Schema Synchronization (Opcional):** Ferramenta para sincronizar automaticamente o schema do banco com os modelos (útil em desenvolvimento, mas perigoso em produção).
-* **Melhorias na Geração de Migração:** Geração de SQL mais inteligente e detecção de renomeações.
-
----
+    * Receitas e melhores práticas.
+* **Exemplos (`examples/`):**
+  * Projetos pequenos e completos demonstrando o uso do TypeGORM com cada banco de dados suportado.
+  * Exemplos focados em funcionalidades específicas (relacionamentos, queries complexas, transações).
+* **Testes:**
+  * **TDD:** O desenvolvimento das funcionalidades será guiado por testes.
+  * **Unit Tests (`_test.go`):** Usar o pacote `testing` padrão do Go. Testar a lógica interna dos pacotes (`core`, `querybuilder`, `schema`, `migration`) sem depender de bancos de dados reais (usar mocks/stubs onde necessário - [GoMock](https://github.com/golang/mock)).
+  * **Integration Tests (`test/` ou `_test.go` com build tags):** Testar a interação real com os bancos de dados.
+    * **Ferramentas:** Usar [Testcontainers for Go](https://golang.testcontainers.org/) para provisionar instâncias Docker dos bancos de dados (MySQL, Postgres, Mongo, Redis, etc.) de forma programática durante os testes. Isso garante um ambiente limpo e consistente.
+    * **Cobertura:** Testar CRUD, relacionamentos, migrations, transações e queries complexas contra bancos reais.
+  * **CI/CD:** Configurar GitHub Actions para:
+    * Rodar linters (`golangci-lint`).
+    * Executar testes unitários e de integração (com Testcontainers) a cada commit/pull request.
+    * Calcular cobertura de código ([Codecov](https://about.codecov.io/)).
+    * Construir a CLI.
+    * (Opcional) Publicar a documentação no GitHub Pages.
+    * (Opcional) Criar releases no GitHub.
 
 ## Extras
 
-### Links Úteis:
-* **Go Official Documentation:** [https://go.dev/doc/](https://go.dev/doc/)
-* **Go `database/sql` Tutorial:** [http://go-database-sql.org/](http://go-database-sql.org/)
-* **TypeORM Documentation:** [https://typeorm.io/](https://typeorm.io/)
-* **Drivers Go:**
-    * MySQL: [https://github.com/go-sql-driver/mysql](https://github.com/go-sql-driver/mysql)
-    * PostgreSQL (pgx): [https://github.com/jackc/pgx](https://github.com/jackc/pgx)
-    * MongoDB: [https://github.com/mongodb/mongo-go-driver](https://github.com/mongodb/mongo-go-driver)
-    * Oracle (godror): [https://github.com/godror/godror](https://github.com/godror/godror)
-    * SQLite: [https://github.com/mattn/go-sqlite3](https://github.com/mattn/go-sqlite3)
-    * Redis: [https://github.com/go-redis/redis](https://github.com/go-redis/redis)
-
-### Integração Contínua e Testes Automatizados:
-* **CI:** Usar GitHub Actions, GitLab CI ou similar para:
-    * Rodar `go build`, `go vet`, `staticcheck`.
-    * Executar testes unitários e de integração (`go test -race ./...`).
-    * Testar contra múltiplos bancos de dados (usando Docker ou serviços de CI).
-    * Publicar releases.
-* **Testes:**
-    * **Unitários:** Testar lógica isolada (parsing de tags, construção de query sem executar).
-    * **Integração:** Testar operações CRUD, migrações, transações contra bancos de dados reais (gerenciados via Docker nos testes). Cobrir todos os dialetos suportados.
-
----
-
-Este documento fornece uma base sólida para o desenvolvimento do **TypeGorm**. É um projeto ambicioso que requer um esforço considerável, especialmente para suportar múltiplos bancos de dados de forma robusta e completa como o TypeORM original. A chave será focar na qualidade da API, na robustez da implementação e na clareza da documentação.
+* **Extensibilidade e Manutenção:**
+  * Aderir estritamente às interfaces de dialeto para facilitar a adição de novos drivers.
+  * Manter baixo acoplamento entre os módulos.
+  * Usar injeção de dependência onde apropriado.
+  * Documentar claramente as interfaces e pontos de extensão.
+  * Versionamento semântico (SemVer) para gerenciar mudanças na API pública.
+* **Ferramentas Recomendadas:**
+  * **Testes:** `testing`, `testify/assert`, `GoMock`, `Testcontainers for Go`.
+  * **Linting:** `golangci-lint`.
+  * **CI/CD:** GitHub Actions.
+  * **Cobertura:** Codecov / Coveralls.
+* **Links Úteis:**
+  * Go `database/sql`: [https://pkg.go.dev/database/sql](https://pkg.go.dev/database/sql)
+  * GORM: [https://gorm.io/](https://gorm.io/)
+  * TypeORM: [https://typeorm.io/](https://typeorm.io/)
+  * Go Project Layout: [https://github.com/golang-standards/project-layout](https://github.com/golang-standards/project-layout) (Usar com discernimento)
+  * SOLID Principles: [https://en.wikipedia.org/wiki/SOLID](https://en.wikipedia.org/wiki/SOLID)
+  * Testcontainers for Go: [https://golang.testcontainers.org/](https://golang.testcontainers.org/)
