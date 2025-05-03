@@ -9,11 +9,10 @@ import (
 	"strings"
 	"time"
 
-	// Import blank the underlying driver for its side effects (registration in database/sql)
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/go-sql-driver/mysql" // Register driver
 
 	"github.com/chmenegatti/typegorm/pkg/config"
-	"github.com/chmenegatti/typegorm/pkg/dialects" // For registration
+	"github.com/chmenegatti/typegorm/pkg/dialects"
 	"github.com/chmenegatti/typegorm/pkg/dialects/common"
 	"github.com/chmenegatti/typegorm/pkg/schema"
 )
@@ -23,38 +22,36 @@ import (
 // mysqlDialect implements the common.Dialect interface for MySQL/MariaDB.
 type mysqlDialect struct{}
 
+// (Keep existing Name, Quote, BindVar, GetDataType methods as they are)
 func (d *mysqlDialect) Name() string {
-	return "mysql" // Name used in configuration and registration
+	return "mysql"
 }
 
 func (d *mysqlDialect) Quote(identifier string) string {
-	// MySQL uses backticks for quoting identifiers
-	return "`" + identifier + "`"
+	// Consider replacing internal backticks if necessary, but this is usually sufficient
+	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
 }
 
 func (d *mysqlDialect) BindVar(i int) string {
-	// MySQL uses '?' as the placeholder for prepared statements
 	return "?"
 }
 
-// GetDataType maps a schema.Field definition to a MySQL data type string.
-// This is a basic implementation; more types and constraints will be added later.
 func (d *mysqlDialect) GetDataType(field *schema.Field) (string, error) {
 	sqlType := ""
+	// (Your existing GetDataType logic - slightly simplified for brevity)
 	switch field.GoType.Kind() {
 	case reflect.String:
-		if field.Size > 0 && field.Size < 65535 { // Approximate limit for VARCHAR
+		if field.Size > 0 && field.Size < 65535 {
 			sqlType = fmt.Sprintf("VARCHAR(%d)", field.Size)
 		} else if field.Size >= 65535 {
-			sqlType = "TEXT" // Or MEDIUMTEXT, LONGTEXT depending on size - needs refinement
+			sqlType = "TEXT" // Or MEDIUMTEXT, LONGTEXT
 		} else {
-			sqlType = "VARCHAR(255)" // Default size
+			sqlType = "VARCHAR(255)"
 		}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32:
 		sqlType = "INT"
 	case reflect.Int64, reflect.Uint64:
 		sqlType = "BIGINT"
-		// TODO: Add UNSIGNED if Go type is uint*? Driver often handles this.
 	case reflect.Bool:
 		sqlType = "TINYINT(1)"
 	case reflect.Float32:
@@ -63,39 +60,86 @@ func (d *mysqlDialect) GetDataType(field *schema.Field) (string, error) {
 		sqlType = "DOUBLE"
 	case reflect.Struct:
 		if field.GoType == reflect.TypeOf(time.Time{}) {
-			sqlType = "DATETIME" // Or TIMESTAMP depending on requirements
-		} // Add other struct types like NullString, NullInt64 etc.
+			// Use DATETIME(6) for microsecond precision compatibility with Go's time.Time
+			sqlType = "DATETIME(6)" // Or TIMESTAMP(6)
+		}
 	case reflect.Slice:
 		if field.GoType.Elem().Kind() == reflect.Uint8 {
-			sqlType = "BLOB" // Or VARBINARY, MEDIUMBLOB, LONGBLOB based on size
+			sqlType = "BLOB"
 		}
 	}
 
 	if sqlType == "" {
-		return "", fmt.Errorf("unsupported data type for MySQL: %s", field.GoType.Kind())
+		return "", fmt.Errorf("unsupported data type for mysql: %s", field.GoType.Kind())
 	}
 
-	// Add constraints based on schema.Field metadata (basic example)
 	var constraints []string
 	if field.IsPrimary {
 		constraints = append(constraints, "PRIMARY KEY")
-		// TODO: Add AUTO_INCREMENT based on a tag/convention
-		// if field.IsAutoIncrement { constraints = append(constraints, "AUTO_INCREMENT") }
+		// Example: Check for a tag to determine AUTO_INCREMENT
+		// if _, ok := field.Tags.Get("autoIncrement"); ok {
+		// 	constraints = append(constraints, "AUTO_INCREMENT")
+		// }
 	}
-	if field.IsRequired {
+	if field.IsRequired { // Assuming IsRequired means NOT NULL
 		constraints = append(constraints, "NOT NULL")
 	}
+	// Add default, unique etc. based on Field properties or tags
 	if field.DefaultValue != nil {
-		constraints = append(constraints, fmt.Sprintf("DEFAULT %s", *field.DefaultValue)) // Ensure DefaultValue is properly quoted/formatted
+		// Warning: Ensure DefaultValue is properly formatted/quoted SQL literal
+		constraints = append(constraints, fmt.Sprintf("DEFAULT %s", *field.DefaultValue))
 	}
-	// TODO: Add UNIQUE, INDEX etc. based on tags
+	// if field.IsUnique { constraints = append(constraints, "UNIQUE") }
 
 	return strings.TrimSpace(sqlType + " " + strings.Join(constraints, " ")), nil
 }
 
-// --- DataSource Implementation ---
+// --- NEW: Migration History Table SQL Generation Methods ---
 
-// mysqlDataSource implements common.DataSource using the standard database/sql package.
+// CreateSchemaMigrationsTableSQL returns the SQL for creating the migrations table in MySQL.
+func (d *mysqlDialect) CreateSchemaMigrationsTableSQL(tableName string) string {
+	// Use the dialect's Quote method for the table name.
+	// Use DATETIME(6) for applied_at to store microsecond precision.
+	return fmt.Sprintf(
+		`CREATE TABLE IF NOT EXISTS %s (
+    id VARCHAR(255) NOT NULL PRIMARY KEY COMMENT 'Migration identifier (e.g., timestamp_name)',
+    applied_at DATETIME(6) NOT NULL COMMENT 'Timestamp when the migration was applied UTC'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Tracks applied schema migrations';`,
+		d.Quote(tableName),
+	)
+}
+
+// GetAppliedMigrationsSQL returns the SQL to get applied migration IDs and timestamps from MySQL.
+func (d *mysqlDialect) GetAppliedMigrationsSQL(tableName string) string {
+	// Order by ID ASC for consistent processing.
+	return fmt.Sprintf("SELECT id, applied_at FROM %s ORDER BY id ASC;", d.Quote(tableName))
+}
+
+// InsertMigrationSQL returns the SQL for inserting a migration record in MySQL.
+func (d *mysqlDialect) InsertMigrationSQL(tableName string) string {
+	// Use the dialect's BindVar for placeholders. Expects parameters: id (string), applied_at (time.Time)
+	return fmt.Sprintf("INSERT INTO %s (id, applied_at) VALUES (%s, %s);",
+		d.Quote(tableName),
+		d.BindVar(1), // Placeholder for id
+		d.BindVar(2), // Placeholder for applied_at (should be UTC)
+	)
+}
+
+// DeleteMigrationSQL returns the SQL for deleting a migration record in MySQL by ID.
+func (d *mysqlDialect) DeleteMigrationSQL(tableName string) string {
+	// Use the dialect's BindVar for the placeholder. Expects parameter: id (string)
+	return fmt.Sprintf("DELETE FROM %s WHERE id = %s;",
+		d.Quote(tableName),
+		d.BindVar(1), // Placeholder for id
+	)
+}
+
+// --- End of Migration Specific Methods ---
+
+// --- DataSource Implementation (mysqlDataSource) ---
+// (Keep your existing mysqlDataSource struct and its methods: Connect, Close, Ping, Dialect, BeginTx, Exec, QueryRow, Query)
+// ... (Your existing DataSource code here) ...
+
 type mysqlDataSource struct {
 	db      *sql.DB        // Connection pool
 	dialect common.Dialect // Instance of mysqlDialect
@@ -104,34 +148,54 @@ type mysqlDataSource struct {
 // Connect establishes the database connection pool.
 func (ds *mysqlDataSource) Connect(cfg config.DatabaseConfig) error {
 	if ds.db != nil {
-		return fmt.Errorf("datasource already connected")
+		// Changed error message slightly for clarity
+		return fmt.Errorf("mysql datasource is already connected")
 	}
 	if cfg.Dialect != ds.dialect.Name() {
 		return fmt.Errorf("configuration dialect '%s' does not match datasource dialect '%s'", cfg.Dialect, ds.dialect.Name())
 	}
-
-	// DSN format for go-sql-driver/mysql:
-	// [user[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
-	// Example: "user:password@tcp(localhost:3306)/mydatabase?parseTime=true"
-	db, err := sql.Open(ds.dialect.Name(), cfg.DSN)
-	if err != nil {
-		return fmt.Errorf("failed to open mysql connection: %w", err)
+	if cfg.DSN == "" {
+		return fmt.Errorf("database DSN is required in configuration")
 	}
 
-	// Apply connection pool settings
+	// Add parseTime=true automatically if not present, crucial for scanning DATETIME/TIMESTAMP into time.Time
+	dsn := cfg.DSN
+	if !strings.Contains(dsn, "parseTime=true") {
+		separator := "?"
+		if strings.Contains(dsn, "?") {
+			separator = "&"
+		}
+		dsn = fmt.Sprintf("%s%sparseTime=true", dsn, separator)
+	}
+	// Consider adding multiStatements=true if needed for running migration scripts directly,
+	// but be aware of SQL injection risks if not handled carefully.
+
+	db, err := sql.Open(ds.dialect.Name(), dsn)
+	if err != nil {
+		return fmt.Errorf("failed to open mysql connection using driver '%s': %w", ds.dialect.Name(), err)
+	}
+
+	// Apply connection pool settings from config (ensure Pool struct exists in config.DatabaseConfig)
+	// Check if Pool is non-nil before accessing members if it's a pointer
+	// Assuming Pool is a struct value based on previous context:
 	if cfg.Pool.MaxIdleConns > 0 {
 		db.SetMaxIdleConns(cfg.Pool.MaxIdleConns)
+	} else {
+		// Set a reasonable default if not specified? e.g., 2
+		db.SetMaxIdleConns(2)
 	}
 	if cfg.Pool.MaxOpenConns > 0 {
 		db.SetMaxOpenConns(cfg.Pool.MaxOpenConns)
+	}
+	if cfg.Pool.ConnMaxIdleTime > 0 { // Use ConnMaxIdleTime introduced in Go 1.15+
+		db.SetConnMaxIdleTime(cfg.Pool.ConnMaxIdleTime)
 	}
 	if cfg.Pool.ConnMaxLifetime > 0 {
 		db.SetConnMaxLifetime(cfg.Pool.ConnMaxLifetime)
 	}
 
 	// Verify connection is working
-	// Use a reasonable timeout context
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // Sensible default timeout
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close() // Close the pool if ping fails
@@ -139,44 +203,43 @@ func (ds *mysqlDataSource) Connect(cfg config.DatabaseConfig) error {
 	}
 
 	ds.db = db
+	fmt.Printf("Successfully connected to MySQL database using DSN: %s\n", dsn) // Informative log
 	return nil
 }
 
-// Close closes the underlying database connection pool.
 func (ds *mysqlDataSource) Close() error {
 	if ds.db == nil {
-		return fmt.Errorf("datasource is not connected")
+		return fmt.Errorf("mysql datasource is not connected")
 	}
 	err := ds.db.Close()
 	ds.db = nil // Mark as closed
+	if err == nil {
+		fmt.Println("MySQL database connection closed.")
+	}
 	return err
 }
 
-// Ping checks the database connectivity.
 func (ds *mysqlDataSource) Ping(ctx context.Context) error {
 	if ds.db == nil {
-		return fmt.Errorf("datasource is not connected")
+		return fmt.Errorf("mysql datasource is not connected")
 	}
 	return ds.db.PingContext(ctx)
 }
 
-// Dialect returns the associated dialect implementation.
 func (ds *mysqlDataSource) Dialect() common.Dialect {
 	return ds.dialect
 }
 
-// BeginTx starts a new transaction.
 func (ds *mysqlDataSource) BeginTx(ctx context.Context, opts any) (common.Tx, error) {
 	if ds.db == nil {
-		return nil, fmt.Errorf("datasource is not connected")
+		return nil, fmt.Errorf("mysql datasource is not connected")
 	}
 
 	var txOptions *sql.TxOptions
-	// Check if opts is sql.TxOptions or compatible
 	if sqlOpts, ok := opts.(sql.TxOptions); ok {
 		txOptions = &sqlOpts
 	} else if opts != nil {
-		// Handle incompatible options if necessary, or return error
+		// Maybe log a warning instead of erroring? Or support specific option types later.
 		return nil, fmt.Errorf("unsupported transaction options type: %T", opts)
 	}
 
@@ -184,153 +247,104 @@ func (ds *mysqlDataSource) BeginTx(ctx context.Context, opts any) (common.Tx, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin mysql transaction: %w", err)
 	}
-	return &mysqlTx{tx: sqlTx}, nil // Wrap the standard sql.Tx
+	// Wrap the standard sql.Tx in our common.Tx implementation
+	return &mysqlTx{tx: sqlTx}, nil
 }
 
-// Exec executes a query without returning rows.
 func (ds *mysqlDataSource) Exec(ctx context.Context, query string, args ...any) (common.Result, error) {
 	if ds.db == nil {
-		return nil, fmt.Errorf("datasource is not connected")
+		return nil, fmt.Errorf("mysql datasource is not connected")
 	}
 	res, err := ds.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return nil, err // Return underlying error directly
+		// Consider wrapping the error for more context if needed downstream
+		return nil, fmt.Errorf("mysql exec failed: %w", err)
 	}
-	return &mysqlResult{result: res}, nil // Wrap the standard sql.Result
+	// Wrap the standard sql.Result
+	return &mysqlResult{result: res}, nil
 }
 
-// QueryRow executes a query expected to return at most one row.
 func (ds *mysqlDataSource) QueryRow(ctx context.Context, query string, args ...any) common.RowScanner {
 	if ds.db == nil {
-		// How to return an error here? The interface returns RowScanner directly.
-		// Option 1: Return a RowScanner that always returns an error on Scan.
-		// Option 2: Change interface (breaking change).
-		// Let's go with option 1 for now.
-		return &errorRowScanner{err: fmt.Errorf("datasource is not connected")}
+		// Return the error scanner wrapper as implemented
+		return &errorRowScanner{err: fmt.Errorf("mysql datasource is not connected")}
 	}
-	row := ds.db.QueryRowContext(ctx, query, args...)
-	return &mysqlRowScanner{row: row} // Wrap the standard sql.Row
+	// Wrap the standard sql.Row
+	return &mysqlRowScanner{row: ds.db.QueryRowContext(ctx, query, args...)}
 }
 
-// Query executes a query returning multiple rows.
 func (ds *mysqlDataSource) Query(ctx context.Context, query string, args ...any) (common.Rows, error) {
 	if ds.db == nil {
-		return nil, fmt.Errorf("datasource is not connected")
+		return nil, fmt.Errorf("mysql datasource is not connected")
 	}
 	rows, err := ds.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err // Return underlying error directly
+		// Consider wrapping error
+		return nil, fmt.Errorf("mysql query failed: %w", err)
 	}
-	return &mysqlRows{rows: rows}, nil // Wrap the standard sql.Rows
+	// Wrap the standard sql.Rows
+	return &mysqlRows{rows: rows}, nil
 }
 
-// --- Tx Implementation ---
-
-// mysqlTx wraps sql.Tx to implement common.Tx.
+// --- Tx Implementation (mysqlTx) ---
 type mysqlTx struct {
 	tx *sql.Tx
 }
 
-func (t *mysqlTx) Commit() error {
-	return t.tx.Commit()
-}
-
-func (t *mysqlTx) Rollback() error {
-	return t.tx.Rollback()
-}
-
+func (t *mysqlTx) Commit() error   { return t.tx.Commit() }
+func (t *mysqlTx) Rollback() error { return t.tx.Rollback() }
 func (t *mysqlTx) Exec(ctx context.Context, query string, args ...any) (common.Result, error) {
 	res, err := t.tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mysql tx exec failed: %w", err)
 	}
 	return &mysqlResult{result: res}, nil
 }
-
 func (t *mysqlTx) QueryRow(ctx context.Context, query string, args ...any) common.RowScanner {
-	row := t.tx.QueryRowContext(ctx, query, args...)
-	return &mysqlRowScanner{row: row}
+	return &mysqlRowScanner{row: t.tx.QueryRowContext(ctx, query, args...)}
 }
-
 func (t *mysqlTx) Query(ctx context.Context, query string, args ...any) (common.Rows, error) {
 	rows, err := t.tx.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mysql tx query failed: %w", err)
 	}
 	return &mysqlRows{rows: rows}, nil
 }
 
-// --- Result Implementation ---
+// --- Result Implementation (mysqlResult) ---
+type mysqlResult struct{ result sql.Result }
 
-// mysqlResult wraps sql.Result to implement common.Result.
-type mysqlResult struct {
-	result sql.Result
-}
+func (r *mysqlResult) LastInsertId() (int64, error) { return r.result.LastInsertId() }
+func (r *mysqlResult) RowsAffected() (int64, error) { return r.result.RowsAffected() }
 
-func (r *mysqlResult) LastInsertId() (int64, error) {
-	return r.result.LastInsertId()
-}
+// --- Rows Implementation (mysqlRows) ---
+type mysqlRows struct{ rows *sql.Rows }
 
-func (r *mysqlResult) RowsAffected() (int64, error) {
-	return r.result.RowsAffected()
-}
+func (r *mysqlRows) Close() error               { return r.rows.Close() }
+func (r *mysqlRows) Next() bool                 { return r.rows.Next() }
+func (r *mysqlRows) Scan(dest ...any) error     { return r.rows.Scan(dest...) }
+func (r *mysqlRows) Columns() ([]string, error) { return r.rows.Columns() }
+func (r *mysqlRows) Err() error                 { return r.rows.Err() }
 
-// --- Rows Implementation ---
+// --- RowScanner Implementation (mysqlRowScanner, errorRowScanner) ---
+type mysqlRowScanner struct{ row *sql.Row }
 
-// mysqlRows wraps sql.Rows to implement common.Rows.
-type mysqlRows struct {
-	rows *sql.Rows
-}
+func (rs *mysqlRowScanner) Scan(dest ...any) error { return rs.row.Scan(dest...) }
 
-func (r *mysqlRows) Close() error {
-	return r.rows.Close()
-}
+type errorRowScanner struct{ err error }
 
-func (r *mysqlRows) Next() bool {
-	return r.rows.Next()
-}
-
-func (r *mysqlRows) Scan(dest ...any) error {
-	return r.rows.Scan(dest...)
-}
-
-func (r *mysqlRows) Columns() ([]string, error) {
-	return r.rows.Columns()
-}
-
-func (r *mysqlRows) Err() error {
-	return r.rows.Err()
-}
-
-// --- RowScanner Implementation ---
-
-// mysqlRowScanner wraps sql.Row to implement common.RowScanner.
-type mysqlRowScanner struct {
-	row *sql.Row
-}
-
-func (rs *mysqlRowScanner) Scan(dest ...any) error {
-	return rs.row.Scan(dest...)
-}
-
-// errorRowScanner is a RowScanner that always returns an error.
-// Used when QueryRow is called on a disconnected DataSource.
-type errorRowScanner struct {
-	err error
-}
-
-func (ers *errorRowScanner) Scan(dest ...any) error {
-	return ers.err
-}
+func (ers *errorRowScanner) Scan(dest ...any) error { return ers.err }
 
 // --- Driver Registration ---
 
 func init() {
-	// Register this dialect implementation with the global registry
+	// Register this dialect's DataSource factory with the global registry
 	dialects.Register("mysql", func() common.DataSource {
-		// The factory returns a new instance, Connect will be called on it later.
+		// The factory returns a new DataSource instance with its specific dialect.
+		// The Connect method will be called on this instance later by the application.
 		return &mysqlDataSource{
-			dialect: &mysqlDialect{}, // Create/assign the dialect instance
+			dialect: &mysqlDialect{}, // Assign the dialect implementation
 		}
 	})
+	fmt.Println("MySQL dialect registered.") // Add log to confirm registration
 }

@@ -1,24 +1,12 @@
-# typegorm.yaml - Sample Configuration for TypeGORM
-
-# Database connection settings
 database:
-  # Specifies the database type. Required.
-  # Supported values (based on your current config validation): "mysql", "postgres", "sqlite"
   dialect: "mysql"
+  dsn: "root:password@tcp(127.0.0.1:3306)/my_app_db?charset=utf8mb4&parseTime=True&loc=Local" # MUST UPDATE
+  pool:
+    maxIdleConns: 5
+    maxOpenConns: 20
+    connMaxLifetime: "30m" # e.g., 30 minutes
+    connMaxIdleTime: "10m" # NEW: e.g., 10 minutes idle timeout
 
-  # Data Source Name (DSN) for connecting to the database. Required.
-  # Format depends on the dialect. Replace with your actual credentials and DB details.
-  # MySQL Example: user:password@tcp(host:port)/dbname?charset=utf8mb4&parseTime=True&loc=Local
-  # SQLite Example: file:./my_database.db?cache=shared
-  # PostgreSQL Example: host=localhost port=5432 user=postgres password=password dbname=mydb sslmode=disable
-  dsn: "admin:password@tcp(127.0.0.1:3306)/nemesis?charset=utf8mb4&parseTime=True&loc=Local"
-
-# Migration settings
 migration:
-  # Specifies the path to the directory containing migration files (.sql or .go).
-  # Default value if omitted: "./migrations"
-  directory: "./db/migrations" # Example: Store migrations in a 'db/migrations' subdirectory
-
-  # Specifies the name of the table used to track migration history.
-  # Default value if omitted: "schema_migrations"
-  tableName: "typegorm_schema_history" # Example: Use a custom name for the history table
+  directory: "./db/migrations"
+  tableName: "typegorm_schema_history"

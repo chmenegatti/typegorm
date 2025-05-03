@@ -5,10 +5,18 @@ import (
 	"context"             // Usar context para timeouts, cancelamento, etc.
 	"database/sql/driver" // Reutilizar interfaces de valor quando possível
 	"io"
+	"time"
 
 	"github.com/chmenegatti/typegorm/pkg/config"
 	"github.com/chmenegatti/typegorm/pkg/schema" // Importar o placeholder
 )
+
+// MigrationRecord represents a migration entry in the database.
+// Useful for returning structured data from GetAppliedMigrationsSQL results.
+type MigrationRecord struct {
+	ID        string
+	AppliedAt time.Time
+}
 
 // Dialect define as características e sintaxe específicas de um SGBD.
 // Esta interface foca nas diferenças de sintaxe e tipos.
@@ -38,6 +46,22 @@ type Dialect interface {
 	// - Tratamento de cláusulas específicas (LIMIT/OFFSET, RETURNING).
 	// - Verificação de capacidades (suporte a JSON, CTEs, etc.).
 	// - Geração de SQL para operações DDL (CREATE TABLE, ADD COLUMN).
+
+	// CreateSchemaMigrationsTableSQL returns the SQL statement to create the schema migrations table
+	// if it doesn't exist. The table should store migration IDs and timestamps.
+	CreateSchemaMigrationsTableSQL(tableName string) string
+
+	// GetAppliedMigrationsSQL returns the SQL statement to retrieve the IDs and applied timestamps
+	// of all applied migrations, ordered consistently (e.g., by ID ASC).
+	GetAppliedMigrationsSQL(tableName string) string
+
+	// InsertMigrationSQL returns the SQL statement to insert a migration record (ID, AppliedAt).
+	// It should use the correct BindVar placeholders.
+	InsertMigrationSQL(tableName string) string
+
+	// DeleteMigrationSQL returns the SQL statement to delete a migration record by its ID.
+	// It should use the correct BindVar placeholder.
+	DeleteMigrationSQL(tableName string) string
 }
 
 // DataSource representa a fonte de dados configurada, gerenciando conexões.

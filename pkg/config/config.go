@@ -4,10 +4,25 @@ package config
 import "time"
 
 // PoolConfig define as configurações do pool de conexões.
+// PoolConfig holds connection pool settings.
 type PoolConfig struct {
-	MaxIdleConns    int           `mapstructure:"maxIdleConns"`
-	MaxOpenConns    int           `mapstructure:"maxOpenConns"`
-	ConnMaxLifetime time.Duration `mapstructure:"connMaxLifetime"` // Ex: "1h", "30m"
+	// MaxIdleConns is the maximum number of connections in the idle connection pool.
+	MaxIdleConns int `mapstructure:"maxIdleConns"`
+
+	// MaxOpenConns is the maximum number of open connections to the database.
+	// If MaxOpenConns is <= 0, then there is no limit on the number of open connections.
+	MaxOpenConns int `mapstructure:"maxOpenConns"`
+
+	// ConnMaxLifetime is the maximum amount of time a connection may be reused.
+	// Expired connections may be closed lazily before reuse.
+	// If <= 0, connections are not closed due to a connection's age.
+	ConnMaxLifetime time.Duration `mapstructure:"connMaxLifetime"`
+
+	// ConnMaxIdleTime is the maximum amount of time a connection may be idle.
+	// Expired connections may be closed lazily before reuse.
+	// If <= 0, connections are not closed due to a connection's idle time.
+	// *** ADDED THIS FIELD ***
+	ConnMaxIdleTime time.Duration `mapstructure:"connMaxIdleTime"`
 }
 
 // DatabaseConfig define as configurações de conexão com o banco.
