@@ -12,8 +12,8 @@ type PoolConfig struct {
 
 // DatabaseConfig define as configurações de conexão com o banco.
 type DatabaseConfig struct {
-	Dialect string     `mapstructure:"dialect" validate:"required"`  // Ex: "mysql", "sqlite", "mongodb"
-	DSN     string     `mapstructure:"dsn"      validate:"required"` // Data Source Name específico do dialeto
+	Dialect string     `mapstructure:"dialect" validate:"required"` // Ex: "mysql", "sqlite", "mongodb"
+	DSN     string     `mapstructure:"dsn"     validate:"required"` // Data Source Name específico do dialeto
 	Pool    PoolConfig `mapstructure:"pool"`
 }
 
@@ -26,6 +26,7 @@ type LoggingConfig struct {
 // MigrationConfig define as configurações do sistema de migration.
 type MigrationConfig struct {
 	Directory string `mapstructure:"directory"` // Diretório onde os arquivos de migration estão localizados
+	TableName string `mapstructure:"tableName"` // Nome da tabela de controle de migrations
 }
 
 // Config é a struct principal que agrega todas as configurações.
@@ -37,21 +38,23 @@ type Config struct {
 
 // NewDefaultConfig cria uma configuração com valores padrão.
 func NewDefaultConfig() Config {
+	// Returns the default configuration settings.
 	return Config{
 		Database: DatabaseConfig{
-			// Dialect e DSN devem ser fornecidos pelo usuário
+			// Dialect and DSN have no defaults, they are required user input.
 			Pool: PoolConfig{
-				MaxIdleConns:    5,
-				MaxOpenConns:    10,
-				ConnMaxLifetime: time.Hour * 1,
+				MaxIdleConns:    10,
+				MaxOpenConns:    100,
+				ConnMaxLifetime: 1 * time.Hour,
 			},
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
-			Format: "text",
+			Format: "text", // or "json"
 		},
 		Migration: MigrationConfig{
 			Directory: "migrations",
+			TableName: "schema_migrations",
 		},
 	}
 }
