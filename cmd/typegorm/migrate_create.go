@@ -3,36 +3,34 @@ package main
 
 import (
 	"fmt"
-
-	"github.com/chmenegatti/typegorm/pkg/config"
-	"github.com/chmenegatti/typegorm/pkg/migration"
+	// Import only necessary packages
 	"github.com/spf13/cobra"
+	// Import the migration package
+	"github.com/chmenegatti/typegorm/pkg/migration"
 )
 
 var migrateCreateCmd = &cobra.Command{
 	Use:   "create <migration_name>",
-	Short: "Create a new migration file",
-	Long:  `Creates a new migration file with the current timestamp and the provided name.`,
-	Args:  cobra.ExactArgs(1), // Expect exactly one argument: the migration name
+	Short: "Create a new SQL migration file",
+	Long: `Creates a new timestamped SQL migration file in the configured migration directory.
+The name should be descriptive, e.g., "AddUserTable" or "CreateProductsIndex".
+Example: typegorm migrate create AddUserTable`,
+	Args: cobra.ExactArgs(1), // Requires exactly one argument: the migration name
 	RunE: func(cmd *cobra.Command, args []string) error {
 		migrationName := args[0]
+		fmt.Printf("Executing 'migrate create' for name: %s\n", migrationName)
 
-		cfg, err := config.LoadConfig(cfgFile)
+		// Call the RunCreate function, passing the loaded config and the migration name from args
+		err := migration.RunCreate(cfg, migrationName)
 		if err != nil {
-			return fmt.Errorf("error loading configuration: %w", err)
+			return fmt.Errorf("migration create command failed: %w", err)
 		}
-
-		fmt.Printf("Running migrate create for '%s'...\n", migrationName)
-		err = migration.RunCreate(cfg, migrationName) // Placeholder call
-		if err != nil {
-			return fmt.Errorf("failed to create migration file: %w", err)
-		}
-
-		// Message printed by RunCreate placeholder
+		// Success message is handled within RunCreate
 		return nil
 	},
 }
 
 func init() {
 	migrateCmd.AddCommand(migrateCreateCmd)
+	// Flags specific to 'migrate create', if any (e.g., --type=go in the future)
 }

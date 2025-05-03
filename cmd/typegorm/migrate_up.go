@@ -4,35 +4,29 @@ package main
 import (
 	"fmt"
 
-	"github.com/chmenegatti/typegorm/pkg/config"
-	"github.com/chmenegatti/typegorm/pkg/migration"
 	"github.com/spf13/cobra"
+	// Import the migration package
+	"github.com/chmenegatti/typegorm/pkg/migration"
 )
 
 var migrateUpCmd = &cobra.Command{
 	Use:   "up",
 	Short: "Apply all pending migrations",
-	Long:  `Executes the 'Up' function for all migrations that have not yet been applied to the database.`,
+	Long:  `Applies all migrations that have not yet been run.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Load configuration using the --config flag (if provided) or defaults
-		cfg, err := config.LoadConfig(cfgFile) // cfgFile is the global variable from main.go
-		if err != nil {
-			return fmt.Errorf("error loading configuration: %w", err)
-		}
+		fmt.Println("Executing 'migrate up' command...")
 
-		// Call the migration logic (placeholder for now)
-		fmt.Println("Running migrate up...") // Temporary log
-		err = migration.RunUp(cfg)           // Placeholder call
+		// Call the RunUp function from the migration package, passing the loaded config
+		err := migration.RunUp(cfg)
 		if err != nil {
-			return fmt.Errorf("failed to apply migrations: %w", err)
+			// Return the error directly; Cobra will print it. Add context for clarity.
+			return fmt.Errorf("migration up command failed: %w", err)
 		}
-
-		fmt.Println("Migrations applied successfully (placeholder).")
-		return nil // Return nil on success
+		// Success message is handled within RunUp in this example
+		return nil
 	},
 }
 
 func init() {
-	migrateCmd.AddCommand(migrateUpCmd) // Add 'up' as a subcommand of 'migrate'
-	// Add specific flags for 'up' if needed later (e.g., --steps N)
+	migrateCmd.AddCommand(migrateUpCmd)
 }

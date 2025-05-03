@@ -4,36 +4,35 @@ package main
 import (
 	"fmt"
 
-	"github.com/chmenegatti/typegorm/pkg/config"
-	"github.com/chmenegatti/typegorm/pkg/migration"
 	"github.com/spf13/cobra"
+	// Import the migration package
+	"github.com/chmenegatti/typegorm/pkg/migration"
 )
 
-var downSteps int // Variable to hold the value of the --steps flag
+var (
+	// Flag variable to store the number of steps from --steps flag
+	downSteps int
+)
 
 var migrateDownCmd = &cobra.Command{
 	Use:   "down",
-	Short: "Revert the last applied migration(s)",
-	Long:  `Executes the 'Down' function for the specified number of last applied migrations. Defaults to reverting one migration.`,
+	Short: "Revert the last applied migration or a specific number of steps",
+	Long:  `Reverts migrations that have already been applied. By default, it reverts the last applied migration. Use --steps N to revert N migrations.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.LoadConfig(cfgFile)
-		if err != nil {
-			return fmt.Errorf("error loading configuration: %w", err)
-		}
+		fmt.Println("Executing 'migrate down' command...")
 
-		fmt.Printf("Running migrate down (steps: %d)...\n", downSteps)
-		err = migration.RunDown(cfg, downSteps) // Placeholder call
+		// Call the RunDown function, passing the loaded config and the steps flag value
+		err := migration.RunDown(cfg, downSteps)
 		if err != nil {
-			return fmt.Errorf("failed to revert migrations: %w", err)
+			return fmt.Errorf("migration down command failed: %w", err)
 		}
-
-		fmt.Println("Migrations reverted successfully (placeholder).")
+		// Success message is handled within RunDown in this example
 		return nil
 	},
 }
 
 func init() {
 	migrateCmd.AddCommand(migrateDownCmd)
-	// Add the --steps flag, defaulting to 1
-	migrateDownCmd.Flags().IntVarP(&downSteps, "steps", "s", 1, "Number of migrations to revert")
+	// Define the --steps flag
+	migrateDownCmd.Flags().IntVarP(&downSteps, "steps", "s", 1, "Number of migrations to revert (default: 1)")
 }

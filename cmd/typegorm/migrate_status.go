@@ -4,28 +4,24 @@ package main
 import (
 	"fmt"
 
-	"github.com/chmenegatti/typegorm/pkg/config"
-	"github.com/chmenegatti/typegorm/pkg/migration"
 	"github.com/spf13/cobra"
+	// Import the migration package
+	"github.com/chmenegatti/typegorm/pkg/migration"
 )
 
 var migrateStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show the status of all migrations",
-	Long:  `Compares the available migration files with the applied migrations recorded in the database and shows the status of each (applied or pending).`,
+	Long:  `Displays which migrations have been applied and which are pending based on files in the migration directory and records in the database.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.LoadConfig(cfgFile)
-		if err != nil {
-			return fmt.Errorf("error loading configuration: %w", err)
-		}
+		fmt.Println("Executing 'migrate status' command...")
 
-		fmt.Println("Running migrate status...")
-		err = migration.RunStatus(cfg) // Placeholder call
+		// Call the RunStatus function, passing the loaded config
+		err := migration.RunStatus(cfg)
 		if err != nil {
-			return fmt.Errorf("failed to get migration status: %w", err)
+			return fmt.Errorf("migration status command failed: %w", err)
 		}
-
-		// Status details would be printed by RunStatus itself
+		// Output is handled within RunStatus in this example
 		return nil
 	},
 }
