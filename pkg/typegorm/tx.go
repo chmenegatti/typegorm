@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -308,12 +309,16 @@ func (tx *Tx) FindFirst(ctx context.Context, dest any, conds ...any) *Result {
 		return result
 	}
 	dialect := tx.dialect
-	// *** Use package-level buildWhereClause helper ***
-	whereClauses, whereArgs, err := buildWhereClause(dialect, model, conds...)
+	condition, _, err := processFindArgs(conds...) // Use helper from query_options.go
 	if err != nil {
 		result.Error = err
 		return result
 	}
+	whereClauses, whereArgs, err := buildWhereClause(dialect, model, condition)
+	if err != nil {
+		result.Error = err
+		return result
+	} // Use helper
 	selectCols := []string{}
 	scanFields := []*schema.Field{}
 	for _, field := range model.Fields {
@@ -339,7 +344,6 @@ func (tx *Tx) FindFirst(ctx context.Context, dest any, conds ...any) *Result {
 	queryBuilder.WriteString(" LIMIT 1")
 	sqlQuery := queryBuilder.String()
 	fmt.Printf("TX Executing SQL: %s | Args: %v\n", sqlQuery, whereArgs)
-	// *** Use tx.source.QueryRow ***
 	rowScanner := tx.source.QueryRow(ctx, sqlQuery, whereArgs...)
 	scanDest := make([]any, len(scanFields))
 	for i, field := range scanFields {
@@ -447,8 +451,10 @@ func (tx *Tx) Updates(ctx context.Context, modelWithValue any, data map[string]a
 }
 
 // Find retrieves multiple records within the transaction.
-func (tx *Tx) Find(ctx context.Context, dest any, conds ...any) *Result {
+func (tx *Tx) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 	result := &Result{}
+
+	// 1. Validate dest input
 	destValue := reflect.ValueOf(dest)
 	if destValue.Kind() != reflect.Pointer || destValue.IsNil() {
 		result.Error = fmt.Errorf("tx: destination must be a non-nil pointer to a slice, got %T", dest)
@@ -459,6 +465,8 @@ func (tx *Tx) Find(ctx context.Context, dest any, conds ...any) *Result {
 		result.Error = fmt.Errorf("tx: destination must be a pointer to a slice, got pointer to %s", sliceValue.Kind())
 		return result
 	}
+
+	// 2. Get Slice Element Type and Parse Schema
 	elementType := sliceValue.Type().Elem()
 	elementIsPointer := (elementType.Kind() == reflect.Pointer)
 	schemaType := elementType
@@ -474,13 +482,23 @@ func (tx *Tx) Find(ctx context.Context, dest any, conds ...any) *Result {
 		result.Error = fmt.Errorf("tx: failed to parse schema for slice element type %s: %w", elementType.String(), err)
 		return result
 	}
-	dialect := tx.dialect
-	// *** Use package-level buildWhereClause helper ***
-	whereClauses, whereArgs, err := buildWhereClause(dialect, model, conds...)
+
+	// *** NEW: Process conditions and options ***
+	condition, options, err := processFindArgs(condsAndOpts...)
 	if err != nil {
 		result.Error = err
 		return result
 	}
+
+	// 3. Build WHERE clause and arguments
+	dialect := tx.dialect
+	whereClauses, whereArgs, err := buildWhereClause(dialect, model, condition) // Use helper
+	if err != nil {
+		result.Error = err
+		return result
+	}
+
+	// 4. Build SELECT SQL (including ORDER BY, LIMIT, OFFSET)
 	selectCols := []string{}
 	scanFields := []*schema.Field{}
 	for _, field := range model.Fields {
@@ -503,7 +521,22 @@ func (tx *Tx) Find(ctx context.Context, dest any, conds ...any) *Result {
 		queryBuilder.WriteString(" WHERE ")
 		queryBuilder.WriteString(strings.Join(whereClauses, " AND "))
 	}
+	// *** NEW: Append optional clauses ***
+	if options.orderBy != "" {
+		queryBuilder.WriteString(" ORDER BY ")
+		queryBuilder.WriteString(options.orderBy)
+	}
+	if options.limit > 0 {
+		queryBuilder.WriteString(" LIMIT ")
+		queryBuilder.WriteString(strconv.Itoa(options.limit))
+	}
+	if options.offset > 0 {
+		queryBuilder.WriteString(" OFFSET ")
+		queryBuilder.WriteString(strconv.Itoa(options.offset))
+	}
 	sqlQuery := queryBuilder.String()
+
+	// 5. Execute Query using Query()
 	fmt.Printf("TX Executing SQL: %s | Args: %v\n", sqlQuery, whereArgs)
 	// *** Use tx.source.Query ***
 	rows, err := tx.source.Query(ctx, sqlQuery, whereArgs...)
@@ -512,6 +545,8 @@ func (tx *Tx) Find(ctx context.Context, dest any, conds ...any) *Result {
 		return result
 	}
 	defer rows.Close()
+
+	// 6. Iterate and Scan Rows into Slice (remains the same logic)
 	sliceValue.Set(reflect.MakeSlice(sliceValue.Type(), 0, 0))
 	rowCount := 0
 	for rows.Next() {

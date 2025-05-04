@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings" // For SQL builder
 	"time"
 
@@ -823,52 +824,56 @@ func (db *DB) Updates(ctx context.Context, modelWithValue any, data map[string]a
 // 'dest' must be a pointer to a slice of structs (e.g., &[]User{}).
 // 'conds' are the query conditions (struct pointer or map[string]any).
 // Returns a Result object. Result.Error contains database/scan errors, but NOT sql.ErrNoRows.
-func (db *DB) Find(ctx context.Context, dest any, conds ...any) *Result {
+func (db *DB) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 	result := &Result{}
 
-	// 1. Validate dest input - MUST be pointer to slice
+	// 1. Validate dest input
 	destValue := reflect.ValueOf(dest)
 	if destValue.Kind() != reflect.Pointer || destValue.IsNil() {
 		result.Error = fmt.Errorf("destination must be a non-nil pointer to a slice, got %T", dest)
 		return result
 	}
-	sliceValue := destValue.Elem() // The slice variable itself
+	sliceValue := destValue.Elem()
 	if sliceValue.Kind() != reflect.Slice {
 		result.Error = fmt.Errorf("destination must be a pointer to a slice, got pointer to %s", sliceValue.Kind())
 		return result
 	}
 
 	// 2. Get Slice Element Type and Parse Schema
-	elementType := sliceValue.Type().Elem() // Type of elements IN the slice (e.g., User or *User)
+	elementType := sliceValue.Type().Elem()
 	elementIsPointer := (elementType.Kind() == reflect.Pointer)
 	schemaType := elementType
-	if schemaType.Kind() == reflect.Pointer {
-		schemaType = schemaType.Elem() // Get the type the pointer points to (e.g., User from *User)
+	if elementIsPointer {
+		schemaType = elementType.Elem()
 	}
-	// Ensure the type we are parsing is actually a struct
 	if schemaType.Kind() != reflect.Struct {
 		result.Error = fmt.Errorf("destination slice elements must be structs or pointers to structs, underlying type is %s", schemaType.Kind())
 		return result
 	}
-	// Parse schema based on the underlying element struct type
-	// Pass a pointer to a zero value of the struct type (e.g., &User{})
-	model, err := db.GetModel(reflect.New(schemaType).Interface()) // Use schemaType
+	model, err := db.GetModel(reflect.New(schemaType).Interface())
 	if err != nil {
-		// Use elementType in error message for clarity to user
 		result.Error = fmt.Errorf("failed to parse schema for slice element type %s: %w", elementType.String(), err)
 		return result
 	}
-	// 3. Build WHERE clause and arguments (reuse helper)
-	dialect := db.source.Dialect()
-	whereClauses, whereArgs, err := buildWhereClause(dialect, model, conds...)
+
+	// *** NEW: Process conditions and options ***
+	condition, options, err := processFindArgs(condsAndOpts...)
 	if err != nil {
-		result.Error = err // Error from buildWhereClause
+		result.Error = err
 		return result
 	}
 
-	// 4. Build SELECT SQL (without LIMIT 1)
+	// 3. Build WHERE clause and arguments
+	dialect := db.source.Dialect()
+	whereClauses, whereArgs, err := buildWhereClause(dialect, model, condition) // Pass only the condition
+	if err != nil {
+		result.Error = err
+		return result
+	}
+
+	// 4. Build SELECT SQL (including ORDER BY, LIMIT, OFFSET)
 	selectCols := []string{}
-	scanFields := []*schema.Field{} // Keep track of fields in SELECT order
+	scanFields := []*schema.Field{}
 	for _, field := range model.Fields {
 		if !field.IsIgnored {
 			selectCols = append(selectCols, dialect.Quote(field.DBName))
@@ -890,30 +895,45 @@ func (db *DB) Find(ctx context.Context, dest any, conds ...any) *Result {
 		queryBuilder.WriteString(" WHERE ")
 		queryBuilder.WriteString(strings.Join(whereClauses, " AND "))
 	}
-	// TODO: Add ORDER BY clause later?
+
+	// *** NEW: Append optional clauses ***
+	if options.orderBy != "" {
+		// WARNING: Direct use of orderBy string. Ensure it's safe.
+		queryBuilder.WriteString(" ORDER BY ")
+		queryBuilder.WriteString(options.orderBy)
+	}
+	if options.limit > 0 { // Only add LIMIT if it's positive
+		queryBuilder.WriteString(" LIMIT ")
+		queryBuilder.WriteString(strconv.Itoa(options.limit))
+	}
+	if options.offset > 0 { // Only add OFFSET if it's positive
+		// Note: OFFSET without LIMIT might behave differently across DBs or be invalid.
+		// Usually used in conjunction with LIMIT.
+		queryBuilder.WriteString(" OFFSET ")
+		queryBuilder.WriteString(strconv.Itoa(options.offset))
+	}
+	// *** End Append optional clauses ***
+
 	sqlQuery := queryBuilder.String()
 
 	// 5. Execute Query using Query()
-	fmt.Printf("Executing SQL: %s | Args: %v\n", sqlQuery, whereArgs) // Debug log
+	fmt.Printf("Executing SQL: %s | Args: %v\n", sqlQuery, whereArgs)
 	rows, err := db.source.Query(ctx, sqlQuery, whereArgs...)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to execute find query for %s: %w", model.Name, err)
 		return result
 	}
-	defer rows.Close() // Ensure rows are closed
+	defer rows.Close()
 
-	// 6. Iterate and Scan Rows into Slice
-	// Reset the destination slice to empty before appending
+	// 6. Iterate and Scan Rows into Slice (remains the same logic)
 	sliceValue.Set(reflect.MakeSlice(sliceValue.Type(), 0, 0))
 	rowCount := 0
-
 	for rows.Next() {
 		rowCount++
-		newElemInstance := reflect.New(schemaType).Elem() // Create User, not *User
+		newElemInstance := reflect.New(schemaType).Elem()
 		scanDest := make([]any, len(scanFields))
-		// Prepare scan destinations pointing to fields of the new struct instance
 		for i, field := range scanFields {
-			fieldValue := newElemInstance.FieldByName(field.GoName) // Use FieldByName on the struct instance
+			fieldValue := newElemInstance.FieldByName(field.GoName)
 			if !fieldValue.IsValid() {
 				result.Error = fmt.Errorf("internal error: struct field %s not found in new element", field.GoName)
 				return result
@@ -924,30 +944,23 @@ func (db *DB) Find(ctx context.Context, dest any, conds ...any) *Result {
 			}
 			scanDest[i] = fieldValue.Addr().Interface()
 		}
-		// Scan the current row into the new element instance
 		if err := rows.Scan(scanDest...); err != nil {
 			result.Error = fmt.Errorf("failed to scan row for model %s: %w", model.Name, err)
 			return result
 		}
-
 		if elementIsPointer {
-			// If dest is *[]*User, append the pointer newElemInstance.Addr()
 			sliceValue.Set(reflect.Append(sliceValue, newElemInstance.Addr()))
 		} else {
-			// If dest is *[]User, append the value newElemInstance
 			sliceValue.Set(reflect.Append(sliceValue, newElemInstance))
 		}
-	} // End rows.Next() loop
-
-	// Check for errors during row iteration
+	}
 	if err := rows.Err(); err != nil {
 		result.Error = fmt.Errorf("error iterating query results for %s: %w", model.Name, err)
 		return result
 	}
-
-	result.RowsAffected = int64(rowCount) // Store how many rows were found/scanned
+	result.RowsAffected = int64(rowCount)
 	fmt.Printf("Successfully found and scanned %d record(s) into slice of %s\n", rowCount, elementType.Name())
-	return result // Error is nil if query and scan succeeded
+	return result
 }
 
 // --- NEW: Begin Method ---
@@ -991,50 +1004,51 @@ func (db *DB) Begin(ctx context.Context, opts ...*sql.TxOptions) (*Tx, error) {
 // Returns slice of clauses, slice of args, and error.
 // buildWhereClause constructs the WHERE clause parts based on conditions.
 // Moved outside DB/Tx struct to be reusable.
-func buildWhereClause(dialect common.Dialect, model *schema.Model, conds ...any) ([]string, []any, error) {
+func buildWhereClause(dialect common.Dialect, model *schema.Model, condition any) ([]string, []any, error) {
 	whereClauses := []string{}
 	whereArgs := []any{}
+	// *** FIXED: Handle nil condition explicitly ***
+	if condition == nil {
+		return whereClauses, whereArgs, nil // No conditions to build
+	}
 
-	if len(conds) > 0 {
-		queryCond := conds[0]
-		queryValue := reflect.ValueOf(queryCond)
-
-		if queryValue.Kind() == reflect.Pointer && queryValue.Elem().Kind() == reflect.Struct {
-			queryStruct := queryValue.Elem()
-			for i := 0; i < queryStruct.NumField(); i++ {
-				fieldValue := queryStruct.Field(i)
-				if fieldValue.IsValid() && !fieldValue.IsZero() {
-					goFieldName := queryStruct.Type().Field(i).Name
-					schemaField, ok := model.GetField(goFieldName)
-					if !ok || schemaField.IsIgnored {
-						continue
-					}
-					whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", dialect.Quote(schemaField.DBName), dialect.BindVar(len(whereArgs)+1)))
-					whereArgs = append(whereArgs, fieldValue.Interface())
-				}
-			}
-		} else if queryValue.Kind() == reflect.Map {
-			iter := queryValue.MapRange()
-			for iter.Next() {
-				key := iter.Key()
-				value := iter.Value()
-				if key.Kind() != reflect.String {
-					return nil, nil, fmt.Errorf("map condition keys must be strings (column names), got %s", key.Kind())
-				}
-				dbColName := key.String()
-				schemaField, ok := model.GetFieldByDBName(dbColName)
-				if !ok {
-					return nil, nil, fmt.Errorf("invalid column name '%s' in map condition for model %s", dbColName, model.Name)
-				}
-				if schemaField.IsIgnored {
+	queryValue := reflect.ValueOf(condition)
+	if queryValue.Kind() == reflect.Pointer && queryValue.Elem().Kind() == reflect.Struct {
+		queryStruct := queryValue.Elem()
+		for i := 0; i < queryStruct.NumField(); i++ {
+			fieldValue := queryStruct.Field(i)
+			if fieldValue.IsValid() && !fieldValue.IsZero() {
+				goFieldName := queryStruct.Type().Field(i).Name
+				schemaField, ok := model.GetField(goFieldName)
+				if !ok || schemaField.IsIgnored {
 					continue
 				}
-				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", dialect.Quote(dbColName), dialect.BindVar(len(whereArgs)+1)))
-				whereArgs = append(whereArgs, value.Interface())
+				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", dialect.Quote(schemaField.DBName), dialect.BindVar(len(whereArgs)+1)))
+				whereArgs = append(whereArgs, fieldValue.Interface())
 			}
-		} else {
-			return nil, nil, fmt.Errorf("unsupported condition type: %T. Expecting struct pointer or map[string]any", queryCond)
 		}
+	} else if queryValue.Kind() == reflect.Map {
+		iter := queryValue.MapRange()
+		for iter.Next() {
+			key := iter.Key()
+			value := iter.Value()
+			if key.Kind() != reflect.String {
+				return nil, nil, fmt.Errorf("map condition keys must be strings (column names), got %s", key.Kind())
+			}
+			dbColName := key.String()
+			schemaField, ok := model.GetFieldByDBName(dbColName)
+			if !ok {
+				return nil, nil, fmt.Errorf("invalid column name '%s' in map condition for model %s", dbColName, model.Name)
+			}
+			if schemaField.IsIgnored {
+				continue
+			}
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", dialect.Quote(dbColName), dialect.BindVar(len(whereArgs)+1)))
+			whereArgs = append(whereArgs, value.Interface())
+		}
+	} else {
+		// Error should only trigger if condition is non-nil and not struct ptr or map
+		return nil, nil, fmt.Errorf("unsupported condition type: %T. Expecting struct pointer or map[string]any", condition)
 	}
 	return whereClauses, whereArgs, nil
 }

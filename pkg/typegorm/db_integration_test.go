@@ -912,3 +912,134 @@ func TestDBTransaction_RollbackOnError(t *testing.T) {
 
 // TODO: Add tests for using TxOptions (Isolation levels) if needed.
 // TODO: Add tests combining more operations (Create, Update, Delete) within a single Tx.
+
+// Helper to create users for ordering/limiting tests
+func createOrderTestUsers(ctx context.Context, t *testing.T, db *DB) []CreateTestUser {
+	users := []CreateTestUser{
+		{Name: "Charlie", Age: 35},
+		{Name: "Alice", Age: 30},
+		{Name: "Bob", Age: 40},
+		{Name: "David", Age: 35}, // Duplicate age
+	}
+	for i := range users {
+		res := db.Create(ctx, &users[i])
+		require.NoError(t, res.Error, "Failed to create user %s for ordering test", users[i].Name)
+		require.True(t, users[i].ID > 0)
+	}
+	return users
+}
+
+func TestDBFind_Order(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOrderTestUsers(ctx, t, db) // Create users
+
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	ageCol, _ := model.GetFieldByDBName("age")
+
+	// Test Order by Name ASC
+	var usersByNameAsc []CreateTestUser
+	resNameAsc := db.Find(ctx, &usersByNameAsc, Order(fmt.Sprintf("%s ASC", nameCol.DBName))) // Use DB column name
+	require.NoError(t, resNameAsc.Error)
+	require.Len(t, usersByNameAsc, 4)
+	assert.Equal(t, "Alice", usersByNameAsc[0].Name)
+	assert.Equal(t, "Bob", usersByNameAsc[1].Name)
+	assert.Equal(t, "Charlie", usersByNameAsc[2].Name)
+	assert.Equal(t, "David", usersByNameAsc[3].Name)
+
+	// Test Order by Age DESC, Name ASC (for ties)
+	var usersByAgeDesc []CreateTestUser
+	resAgeDesc := db.Find(ctx, &usersByAgeDesc, Order(fmt.Sprintf("%s DESC, %s ASC", ageCol.DBName, nameCol.DBName)))
+	require.NoError(t, resAgeDesc.Error)
+	require.Len(t, usersByAgeDesc, 4)
+	assert.Equal(t, "Bob", usersByAgeDesc[0].Name)     // Age 40
+	assert.Equal(t, "Charlie", usersByAgeDesc[1].Name) // Age 35, C comes before D
+	assert.Equal(t, "David", usersByAgeDesc[2].Name)   // Age 35
+	assert.Equal(t, "Alice", usersByAgeDesc[3].Name)   // Age 30
+}
+
+func TestDBFind_Limit(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOrderTestUsers(ctx, t, db) // Create 4 users
+
+	nameCol, _ := model.GetFieldByDBName("user_name")
+
+	// Test Limit 2 (order by name for predictability)
+	var usersLimit2 []CreateTestUser
+	resLimit2 := db.Find(ctx, &usersLimit2, Order(fmt.Sprintf("%s ASC", nameCol.DBName)), Limit(2))
+	require.NoError(t, resLimit2.Error)
+	require.Len(t, usersLimit2, 2, "Should return exactly 2 users")
+	assert.Equal(t, "Alice", usersLimit2[0].Name)
+	assert.Equal(t, "Bob", usersLimit2[1].Name)
+
+	// Test Limit 0 (should mean no limit, return all) - or should it return none? Let's assume all.
+	var usersLimit0 []CreateTestUser
+	resLimit0 := db.Find(ctx, &usersLimit0, Limit(0)) // Limit 0 or -1 means no limit
+	require.NoError(t, resLimit0.Error)
+	assert.Len(t, usersLimit0, 4, "Limit 0 should return all users")
+
+	// Test Limit -1 (should mean no limit, return all)
+	var usersLimitNeg1 []CreateTestUser
+	resLimitNeg1 := db.Find(ctx, &usersLimitNeg1, Limit(-1))
+	require.NoError(t, resLimitNeg1.Error)
+	assert.Len(t, usersLimitNeg1, 4, "Limit -1 should return all users")
+
+	// Test Limit greater than available records
+	var usersLimit10 []CreateTestUser
+	resLimit10 := db.Find(ctx, &usersLimit10, Limit(10))
+	require.NoError(t, resLimit10.Error)
+	assert.Len(t, usersLimit10, 4, "Limit 10 should return all 4 available users")
+}
+
+func TestDBFind_Offset(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOrderTestUsers(ctx, t, db) // Create 4 users
+
+	nameCol, _ := model.GetFieldByDBName("user_name")
+
+	// Test Offset 1 (order by name for predictability)
+	var usersOffset1 []CreateTestUser
+	resOffset1 := db.Find(ctx, &usersOffset1, Order(fmt.Sprintf("%s ASC", nameCol.DBName)), Offset(1))
+	require.NoError(t, resOffset1.Error)
+	require.Len(t, usersOffset1, 3, "Should return 3 users after skipping 1")
+	assert.Equal(t, "Bob", usersOffset1[0].Name) // Skips Alice
+	assert.Equal(t, "Charlie", usersOffset1[1].Name)
+	assert.Equal(t, "David", usersOffset1[2].Name)
+
+	// Test Offset 3
+	var usersOffset3 []CreateTestUser
+	resOffset3 := db.Find(ctx, &usersOffset3, Order(fmt.Sprintf("%s ASC", nameCol.DBName)), Offset(3))
+	require.NoError(t, resOffset3.Error)
+	require.Len(t, usersOffset3, 1, "Should return 1 user after skipping 3")
+	assert.Equal(t, "David", usersOffset3[0].Name) // Skips Alice, Bob, Charlie
+
+	// Test Offset greater than available records
+	var usersOffset10 []CreateTestUser
+	resOffset10 := db.Find(ctx, &usersOffset10, Offset(10))
+	require.NoError(t, resOffset10.Error)
+	assert.Empty(t, usersOffset10, "Offset 10 should return no users")
+}
+
+func TestDBFind_LimitOffsetOrder(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOrderTestUsers(ctx, t, db) // Create 4 users: A(30), B(40), C(35), D(35)
+
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	ageCol, _ := model.GetFieldByDBName("age")
+
+	// Order by Age DESC, Name ASC: B(40), C(35), D(35), A(30)
+	// Offset 1: Skip B(40) -> Start from C(35)
+	// Limit 2: Take C(35), D(35)
+	var users []CreateTestUser
+	res := db.Find(ctx, &users,
+		Order(fmt.Sprintf("%s DESC, %s ASC", ageCol.DBName, nameCol.DBName)),
+		Offset(1),
+		Limit(2),
+	)
+
+	require.NoError(t, res.Error)
+	require.Len(t, users, 2, "Should return exactly 2 users")
+	assert.Equal(t, "Charlie", users[0].Name) // First user after offset
+	assert.Equal(t, 35, users[0].Age)
+	assert.Equal(t, "David", users[1].Name) // Second user after offset
+	assert.Equal(t, 35, users[1].Age)
+}
