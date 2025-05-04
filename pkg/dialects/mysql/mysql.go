@@ -19,6 +19,20 @@ import (
 
 // --- Dialect Implementation ---
 
+// --- Driver Registration ---
+
+func init() {
+	// Register this dialect's DataSource factory with the global registry
+	dialects.Register("mysql", func() common.DataSource {
+		// The factory returns a new DataSource instance with its specific dialect.
+		// The Connect method will be called on this instance later by the application.
+		return &mysqlDataSource{
+			dialect: &mysqlDialect{}, // Assign the dialect implementation
+		}
+	})
+	fmt.Println("MySQL dialect registered.") // Add log to confirm registration
+}
+
 // mysqlDialect implements the common.Dialect interface for MySQL/MariaDB.
 type mysqlDialect struct{}
 
@@ -334,17 +348,3 @@ func (rs *mysqlRowScanner) Scan(dest ...any) error { return rs.row.Scan(dest...)
 type errorRowScanner struct{ err error }
 
 func (ers *errorRowScanner) Scan(dest ...any) error { return ers.err }
-
-// --- Driver Registration ---
-
-func init() {
-	// Register this dialect's DataSource factory with the global registry
-	dialects.Register("mysql", func() common.DataSource {
-		// The factory returns a new DataSource instance with its specific dialect.
-		// The Connect method will be called on this instance later by the application.
-		return &mysqlDataSource{
-			dialect: &mysqlDialect{}, // Assign the dialect implementation
-		}
-	})
-	fmt.Println("MySQL dialect registered.") // Add log to confirm registration
-}

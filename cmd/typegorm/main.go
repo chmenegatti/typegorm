@@ -8,6 +8,8 @@ import (
 	"github.com/spf13/cobra"
 	// Import the config package we created
 	"github.com/chmenegatti/typegorm/pkg/config" // Adjust the import path as necessary
+
+	_ "github.com/chmenegatti/typegorm/pkg/dialects/mysql"
 )
 
 var (
