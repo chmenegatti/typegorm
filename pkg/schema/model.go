@@ -75,6 +75,17 @@ type Model struct {
 	// --- Relationships (Future) ---
 	// Relations      []*Relation
 
+	// These flags indicate if the model implements the corresponding hook interface.
+	// Checked during parsing.
+	HasBeforeCreate bool
+	HasAfterCreate  bool
+	HasBeforeUpdate bool
+	HasAfterUpdate  bool
+	HasBeforeDelete bool
+	HasAfterDelete  bool
+	HasAfterFind    bool
+	// --- End Hook Flags ---
+
 	// --- Internal ---
 	instance       any            // Keep a zero-value instance for creating new objects (optional)
 	mux            sync.RWMutex   // For thread-safe access if modified after parse (unlikely)

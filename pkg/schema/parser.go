@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time" // Need this for time.Time check
+
+	"github.com/chmenegatti/typegorm/pkg/hooks"
 )
 
 // --- Parser Implementation ---
@@ -65,17 +67,46 @@ func (p *Parser) Parse(value any) (*Model, error) {
 
 	// Not in cache, parse it
 	model := &Model{
-		Name:           structType.Name(),
-		Type:           structType,
-		Fields:         make([]*Field, 0, structType.NumField()),
-		FieldsByName:   make(map[string]*Field),
-		FieldsByDBName: make(map[string]*Field),
-		PrimaryKeys:    make([]*Field, 0),
-		Indexes:        make([]*Index, 0),
-		instance:       reflect.New(structType).Interface(),
-		NamingStrategy: p.namingStrategy,
+		Name:            structType.Name(),
+		Type:            structType,
+		Fields:          make([]*Field, 0, structType.NumField()),
+		FieldsByName:    make(map[string]*Field),
+		FieldsByDBName:  make(map[string]*Field),
+		PrimaryKeys:     make([]*Field, 0),
+		Indexes:         make([]*Index, 0),
+		instance:        reflect.New(structType).Interface(),
+		NamingStrategy:  p.namingStrategy,
+		HasBeforeCreate: false,
+		HasAfterCreate:  false,
+		HasBeforeUpdate: false,
+		HasAfterUpdate:  false,
+		HasBeforeDelete: false,
+		HasAfterDelete:  false,
+		HasAfterFind:    false,
 	}
 	model.TableName = p.namingStrategy.TableName(model.Name)
+
+	// --- Check Hook Interface Implementations ---
+	// *** Use types from the 'hooks' package ***
+	var beforeCreatorType = reflect.TypeOf((*hooks.BeforeCreator)(nil)).Elem()
+	var afterCreatorType = reflect.TypeOf((*hooks.AfterCreator)(nil)).Elem()
+	var beforeUpdaterType = reflect.TypeOf((*hooks.BeforeUpdater)(nil)).Elem()
+	var afterUpdaterType = reflect.TypeOf((*hooks.AfterUpdater)(nil)).Elem()
+	var beforeDeleterType = reflect.TypeOf((*hooks.BeforeDeleter)(nil)).Elem()
+	var afterDeleterType = reflect.TypeOf((*hooks.AfterDeleter)(nil)).Elem()
+	var afterFinderType = reflect.TypeOf((*hooks.AfterFinder)(nil)).Elem()
+
+	pointerType := reflect.PointerTo(structType)
+
+	// Check implementations
+	model.HasBeforeCreate = structType.Implements(beforeCreatorType) || pointerType.Implements(beforeCreatorType)
+	model.HasAfterCreate = structType.Implements(afterCreatorType) || pointerType.Implements(afterCreatorType)
+	model.HasBeforeUpdate = structType.Implements(beforeUpdaterType) || pointerType.Implements(beforeUpdaterType)
+	model.HasAfterUpdate = structType.Implements(afterUpdaterType) || pointerType.Implements(afterUpdaterType)
+	model.HasBeforeDelete = structType.Implements(beforeDeleterType) || pointerType.Implements(beforeDeleterType)
+	model.HasAfterDelete = structType.Implements(afterDeleterType) || pointerType.Implements(afterDeleterType)
+	model.HasAfterFind = structType.Implements(afterFinderType) || pointerType.Implements(afterFinderType)
+	// --- End Hook Check ---
 
 	// Temporary maps to build indexes before creating Index structs
 	indexesByName := make(map[string][]*Field)       // map[index_name][]Field

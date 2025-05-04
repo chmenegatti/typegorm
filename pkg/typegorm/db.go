@@ -20,8 +20,8 @@ import (
 // DB represents the main ORM database handle. Provides ORM methods.
 type DB struct {
 	source common.DataSource // The underlying connected DataSource (MySQL, Postgres, etc.)
-	parser *schema.Parser    // The schema parser instance
-	config config.Config     // Store original config for potential use
+	parser *schema.Parser
+	config config.Config // Store original config for potential use
 	// TODO: Add logger, context, etc.
 }
 
