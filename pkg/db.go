@@ -535,3 +535,284 @@ func (db *DB) Delete(ctx context.Context, value any) *Result {
 
 	return result // Error will be nil if execution succeeded
 }
+
+// --- NEW: FindFirst Method ---
+
+// FindFirst finds the first record matching the given conditions and scans it into dest.
+// 'dest' must be a pointer to a struct.
+// 'conds' can be:
+//   - A pointer to a struct (query-by-example, uses non-zero fields).
+//   - A map[string]any (keys are DB column names).
+//   - TODO: A string followed by args (raw WHERE clause).
+//
+// Returns a Result object. Result.Error will be sql.ErrNoRows if no record is found.
+func (db *DB) FindFirst(ctx context.Context, dest any, conds ...any) *Result {
+	result := &Result{}
+
+	// 1. Validate dest input
+	destValue := reflect.ValueOf(dest)
+	if destValue.Kind() != reflect.Pointer || destValue.IsNil() {
+		result.Error = fmt.Errorf("destination must be a non-nil pointer to a struct, got %T", dest)
+		return result
+	}
+	destElem := destValue.Elem()
+	if destElem.Kind() != reflect.Struct {
+		result.Error = fmt.Errorf("destination must be a pointer to a struct, got pointer to %s", destElem.Kind())
+		return result
+	}
+	destType := destElem.Type()
+
+	// 2. Parse Schema for dest type
+	model, err := db.GetModel(dest)
+	if err != nil {
+		result.Error = fmt.Errorf("failed to parse schema for type %s: %w", destType.Name(), err)
+		return result
+	}
+
+	// 3. Build WHERE clause and arguments based on conds
+	dialect := db.source.Dialect()
+	whereClauses := []string{}
+	whereArgs := []any{}
+
+	if len(conds) > 0 {
+		// Simple condition handling for now: assumes first arg is struct ptr or map
+		queryCond := conds[0]
+		queryValue := reflect.ValueOf(queryCond)
+
+		if queryValue.Kind() == reflect.Pointer && queryValue.Elem().Kind() == reflect.Struct {
+			// Query-by-example (struct pointer)
+			queryStruct := queryValue.Elem()
+			for i := 0; i < queryStruct.NumField(); i++ {
+				fieldValue := queryStruct.Field(i)
+				// Only use exported, non-zero fields for conditions
+				if fieldValue.IsValid() && !fieldValue.IsZero() {
+					goFieldName := queryStruct.Type().Field(i).Name
+					schemaField, ok := model.GetField(goFieldName)
+					if !ok || schemaField.IsIgnored {
+						continue // Skip fields not in the model or ignored
+					}
+					// Add condition: "column_name" = ?
+					whereClauses = append(whereClauses, fmt.Sprintf("%s = %s",
+						dialect.Quote(schemaField.DBName),
+						dialect.BindVar(len(whereArgs)+1),
+					))
+					whereArgs = append(whereArgs, fieldValue.Interface())
+				}
+			}
+		} else if queryValue.Kind() == reflect.Map {
+			// Query by map[string]any (keys are DB column names)
+			iter := queryValue.MapRange()
+			for iter.Next() {
+				key := iter.Key()
+				value := iter.Value()
+				if key.Kind() != reflect.String {
+					result.Error = fmt.Errorf("map condition keys must be strings (column names), got %s", key.Kind())
+					return result
+				}
+				dbColName := key.String()
+				// Verify key is a valid DB column name for the model
+				schemaField, ok := model.GetFieldByDBName(dbColName)
+				if !ok {
+					result.Error = fmt.Errorf("invalid column name '%s' in map condition for model %s", dbColName, model.Name)
+					return result
+				}
+				if schemaField.IsIgnored {
+					continue
+				} // Should not happen if GetFieldByDBName worked
+
+				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s",
+					dialect.Quote(dbColName),
+					dialect.BindVar(len(whereArgs)+1),
+				))
+				whereArgs = append(whereArgs, value.Interface())
+			}
+		} else {
+			// TODO: Handle raw WHERE string + args: if reflect.TypeOf(conds[0]).Kind() == reflect.String { ... }
+			result.Error = fmt.Errorf("unsupported condition type: %T. Expecting struct pointer or map[string]any", queryCond)
+			return result
+		}
+	} // End if len(conds) > 0
+
+	// 4. Build SELECT SQL
+	selectCols := []string{}
+	scanFields := []*schema.Field{}
+	for _, field := range model.Fields {
+		if !field.IsIgnored {
+			selectCols = append(selectCols, dialect.Quote(field.DBName))
+			scanFields = append(scanFields, field)
+		}
+	}
+	if len(selectCols) == 0 {
+		result.Error = fmt.Errorf("no selectable columns found for model %s", model.Name)
+		return result
+	}
+
+	tableNameQuoted := dialect.Quote(model.TableName)
+	queryBuilder := strings.Builder{}
+	queryBuilder.WriteString("SELECT ")
+	queryBuilder.WriteString(strings.Join(selectCols, ", "))
+	queryBuilder.WriteString(" FROM ")
+	queryBuilder.WriteString(tableNameQuoted)
+	if len(whereClauses) > 0 {
+		queryBuilder.WriteString(" WHERE ")
+		queryBuilder.WriteString(strings.Join(whereClauses, " AND "))
+	}
+	// LIMIT 1 for FindFirst
+	queryBuilder.WriteString(" LIMIT 1") // Add LIMIT clause
+
+	sqlQuery := queryBuilder.String()
+
+	// 5. Execute Query using QueryRow
+	fmt.Printf("Executing SQL: %s | Args: %v\n", sqlQuery, whereArgs) // Debug log
+	rowScanner := db.source.QueryRow(ctx, sqlQuery, whereArgs...)
+
+	// 6. Prepare Scan Destinations
+	scanDest := make([]any, len(scanFields))
+	for i, field := range scanFields {
+		fieldValue := destElem.FieldByName(field.GoName)
+		if !fieldValue.IsValid() {
+			result.Error = fmt.Errorf("internal error: struct field %s not found in destination", field.GoName)
+			return result
+		}
+		if !fieldValue.CanAddr() {
+			result.Error = fmt.Errorf("internal error: struct field %s is not addressable", field.GoName)
+			return result
+		}
+		scanDest[i] = fieldValue.Addr().Interface() // Get pointer to field
+	}
+
+	// 7. Scan the row
+	err = rowScanner.Scan(scanDest...)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			fmt.Printf("Record not found matching conditions for %s\n", model.Name)
+			result.Error = sql.ErrNoRows // Use standard error
+		} else {
+			result.Error = fmt.Errorf("failed to scan result for model %s: %w", model.Name, err)
+		}
+		return result
+	}
+
+	result.RowsAffected = 1 // Found and scanned one row
+	fmt.Printf("Successfully found and scanned first record into %s\n", destType.Name())
+	return result
+}
+
+// --- NEW: Updates Method ---
+
+// Updates updates specific fields of a record identified by the primary key in modelWithValue.
+// 'modelWithValue' must be a pointer to a struct instance containing the primary key value(s).
+// 'data' is a map[string]any where keys are DATABASE COLUMN NAMES and values are the new values.
+// It only updates columns provided in the 'data' map.
+// Returns a Result object. Check Result.Error and Result.RowsAffected.
+// RowsAffected == 0 typically means the record was not found with the given PK.
+func (db *DB) Updates(ctx context.Context, modelWithValue any, data map[string]any) *Result {
+	result := &Result{}
+
+	// 1. Validate input model & Get Reflect Value/Type
+	reflectValue := reflect.ValueOf(modelWithValue)
+	if reflectValue.Kind() != reflect.Pointer || reflectValue.IsNil() {
+		result.Error = fmt.Errorf("modelWithValue must be a non-nil pointer to a struct, got %T", modelWithValue)
+		return result
+	}
+	structValue := reflectValue.Elem()
+	if structValue.Kind() != reflect.Struct {
+		result.Error = fmt.Errorf("modelWithValue must be a pointer to a struct, got pointer to %s", structValue.Kind())
+		return result
+	}
+	structType := structValue.Type()
+
+	// 2. Parse Schema
+	model, err := db.GetModel(modelWithValue)
+	if err != nil {
+		result.Error = fmt.Errorf("failed to parse schema for type %s: %w", structType.Name(), err)
+		return result
+	}
+
+	// 3. Extract Primary Key values for WHERE clause
+	if len(model.PrimaryKeys) == 0 {
+		result.Error = fmt.Errorf("cannot update: model %s has no primary key defined", model.Name)
+		return result
+	}
+	pkArgs := make([]any, 0, len(model.PrimaryKeys))
+	pkWhereClauses := make([]string, 0, len(model.PrimaryKeys))
+	dialect := db.source.Dialect()
+	for i, pkField := range model.PrimaryKeys {
+		pkValueField := structValue.FieldByName(pkField.GoName)
+		if !pkValueField.IsValid() {
+			result.Error = fmt.Errorf("internal error: primary key field %s not found in struct %s", pkField.GoName, model.Name)
+			return result
+		}
+		if pkValueField.IsZero() {
+			result.Error = fmt.Errorf("cannot update: primary key field %s has zero value", pkField.GoName)
+			return result
+		}
+		pkArgs = append(pkArgs, pkValueField.Interface())
+		pkWhereClauses = append(pkWhereClauses, fmt.Sprintf("%s = %s", dialect.Quote(pkField.DBName), dialect.BindVar(i+1))) // Placeholders start at 1 for WHERE
+	}
+
+	// 4. Build SET clause and collect arguments
+	setClauses := []string{}
+	setArgs := []any{}
+	placeholderOffset := len(pkArgs) // Placeholders for SET start after PK args
+
+	for dbColName, value := range data {
+		// Validate column name exists in model and is updatable
+		field, ok := model.GetFieldByDBName(dbColName)
+		if !ok {
+			result.Error = fmt.Errorf("invalid column name '%s' provided in update data for model %s", dbColName, model.Name)
+			return result
+		}
+		if field.IsIgnored || field.IsPrimaryKey { // Don't allow updating PKs or ignored fields this way
+			fmt.Printf("Warning: Skipping update for primary key or ignored field '%s'\n", dbColName)
+			continue
+		}
+		// TODO: Add check for read-only fields (like CreatedAt) if needed
+
+		setClauses = append(setClauses, fmt.Sprintf("%s = %s", dialect.Quote(dbColName), dialect.BindVar(placeholderOffset+len(setArgs)+1)))
+		setArgs = append(setArgs, value)
+	}
+
+	// Check if there's anything to update
+	if len(setClauses) == 0 {
+		result.Error = fmt.Errorf("no valid fields provided for update")
+		// Or, arguably, return success with 0 rows affected? Let's return error for now.
+		return result
+	}
+
+	// 5. Build Full UPDATE SQL
+	tableNameQuoted := dialect.Quote(model.TableName)
+	sqlQuery := fmt.Sprintf("UPDATE %s SET %s WHERE %s",
+		tableNameQuoted,
+		strings.Join(setClauses, ", "),
+		strings.Join(pkWhereClauses, " AND "),
+	)
+
+	// Combine SET arguments and WHERE arguments
+	allArgs := append(setArgs, pkArgs...)
+
+	// 6. Execute SQL
+	fmt.Printf("Executing SQL: %s | Args: %v\n", sqlQuery, allArgs) // Debug log
+	sqlResult, err := db.source.Exec(ctx, sqlQuery, allArgs...)
+	if err != nil {
+		result.Error = fmt.Errorf("failed to execute update for %s: %w", model.Name, err)
+		return result
+	}
+
+	// 7. Populate Result
+	affected, err := sqlResult.RowsAffected()
+	if err != nil {
+		fmt.Printf("Warning: could not get RowsAffected after update: %v\n", err)
+	}
+	result.RowsAffected = affected
+
+	if affected == 0 {
+		fmt.Printf("Warning: Update executed but no rows affected (record with PK might not exist or values were the same).\n")
+	} else {
+		fmt.Printf("Successfully updated %d record(s) for %s.\n", affected, model.Name)
+		// TODO: Optionally re-fetch the record to update the input modelWithValue?
+		// Similar logic to the re-fetch in Create.
+	}
+
+	return result // Error will be nil if execution succeeded
+}

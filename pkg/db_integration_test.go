@@ -298,6 +298,340 @@ func TestDBDelete_ZeroPK(t *testing.T) {
 	// assert.Zero(t, count, "No records should be present after failed delete attempt")
 }
 
+// --- NEW Tests for DB.FindFirst ---
+
+func TestDBFindFirst_ByStruct_Success(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+
+	// 1. Arrange: Create multiple records
+	email1 := "findfirst1@example.com"
+	email2 := "findfirst2@example.com"
+	user1 := CreateTestUser{Name: "FindFirstAlice", Email: &email1, Age: 30}
+	user2 := CreateTestUser{Name: "FindFirstBob", Email: &email2, Age: 35}
+	res1 := db.Create(ctx, &user1)
+	require.NoError(t, res1.Error)
+	res2 := db.Create(ctx, &user2)
+	require.NoError(t, res2.Error)
+
+	// 2. Act: Find using a struct pointer with one non-zero field
+	var foundUser CreateTestUser
+	// Query by example: find where Name is "FindFirstBob"
+	query := &CreateTestUser{Name: "FindFirstBob"}
+	findResult := db.FindFirst(ctx, &foundUser, query)
+
+	// 3. Assert
+	require.NoError(t, findResult.Error, "FindFirst returned an error")
+	assert.EqualValues(t, 1, findResult.RowsAffected, "FindFirst should affect 1 row")
+	assert.Equal(t, user2.ID, foundUser.ID, "Found wrong user ID") // Should match user2
+	assert.Equal(t, "FindFirstBob", foundUser.Name)
+	require.NotNil(t, foundUser.Email)
+	assert.Equal(t, email2, *foundUser.Email)
+	assert.Equal(t, 35, foundUser.Age)
+}
+
+func TestDBFindFirst_ByStruct_NotFound(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+
+	// 1. Arrange: Create some records (optional, table is empty initially)
+	email1 := "findfirst_nf1@example.com"
+	user1 := CreateTestUser{Name: "NotFoundAlice", Email: &email1, Age: 30}
+	res1 := db.Create(ctx, &user1)
+	require.NoError(t, res1.Error)
+
+	// 2. Act: Find using criteria that doesn't match
+	var foundUser CreateTestUser
+	query := &CreateTestUser{Name: "NoSuchUserExists"}
+	findResult := db.FindFirst(ctx, &foundUser, query)
+
+	// 3. Assert
+	require.Error(t, findResult.Error, "FindFirst should return an error when record not found")
+	assert.True(t, errors.Is(findResult.Error, sql.ErrNoRows), "Error should be sql.ErrNoRows")
+	assert.Zero(t, foundUser.ID, "foundUser should not be populated") // Check if dest is untouched
+}
+
+func TestDBFindFirst_ByMap_Success(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+
+	// 1. Arrange: Create multiple records
+	email1 := "findmap1@example.com"
+	email2 := "findmap2@example.com"
+	user1 := CreateTestUser{Name: "FindMapAlice", Email: &email1, Age: 40}
+	user2 := CreateTestUser{Name: "FindMapBob", Email: &email2, Age: 45}
+	res1 := db.Create(ctx, &user1)
+	require.NoError(t, res1.Error)
+	res2 := db.Create(ctx, &user2)
+	require.NoError(t, res2.Error)
+
+	// 2. Act: Find using a map with DB column names
+	var foundUser CreateTestUser
+	// Use column names from parsed model for safety
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	ageCol, _ := model.GetFieldByDBName("age")
+	query := map[string]any{
+		nameCol.DBName: "FindMapAlice",
+		ageCol.DBName:  40,
+	}
+	findResult := db.FindFirst(ctx, &foundUser, query)
+
+	// 3. Assert
+	require.NoError(t, findResult.Error, "FindFirst returned an error")
+	assert.EqualValues(t, 1, findResult.RowsAffected)
+	assert.Equal(t, user1.ID, foundUser.ID, "Found wrong user ID") // Should match user1
+	assert.Equal(t, "FindMapAlice", foundUser.Name)
+	require.NotNil(t, foundUser.Email)
+	assert.Equal(t, email1, *foundUser.Email)
+	assert.Equal(t, 40, foundUser.Age)
+}
+
+func TestDBFindFirst_ByMap_NotFound(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+
+	// 1. Arrange: Create some records (optional)
+	email1 := "findmap_nf1@example.com"
+	user1 := CreateTestUser{Name: "NotFoundMapAlice", Email: &email1, Age: 30}
+	res1 := db.Create(ctx, &user1)
+	require.NoError(t, res1.Error)
+
+	// 2. Act: Find using map criteria that doesn't match
+	var foundUser CreateTestUser
+	nameCol, _ := model.GetFieldByDBName("user_name") // Get correct column name
+	query := map[string]any{
+		nameCol.DBName: "NoSuchUser",
+	}
+	findResult := db.FindFirst(ctx, &foundUser, query)
+
+	// 3. Assert
+	require.Error(t, findResult.Error, "FindFirst should return an error when record not found")
+	assert.True(t, errors.Is(findResult.Error, sql.ErrNoRows), "Error should be sql.ErrNoRows")
+	assert.Zero(t, foundUser.ID)
+}
+
+func TestDBFindFirst_InvalidConditionType(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+	var foundUser CreateTestUser
+
+	// Act: Call FindFirst with an unsupported condition type (e.g., int)
+	findResult := db.FindFirst(ctx, &foundUser, 12345)
+
+	// Assert
+	require.Error(t, findResult.Error, "FindFirst should return error for invalid condition type")
+	assert.Contains(t, findResult.Error.Error(), "unsupported condition type", "Error message mismatch")
+}
+
+func TestDBFindFirst_InvalidMapKey(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+	var foundUser CreateTestUser
+
+	// Act: Call FindFirst with a map containing a key that isn't a valid column
+	query := map[string]any{"non_existent_column": "some_value"}
+	findResult := db.FindFirst(ctx, &foundUser, query)
+
+	// Assert
+	require.Error(t, findResult.Error, "FindFirst should return error for invalid map key")
+	assert.Contains(t, findResult.Error.Error(), "invalid column name 'non_existent_column'", "Error message mismatch")
+}
+
+// --- NEW Tests for DB.Updates ---
+
+func TestDBUpdates_Success(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a record
+	initialEmail := "update_me@example.com"
+	user := CreateTestUser{Name: "UpdateInitial", Email: &initialEmail, Age: 50}
+	createResult := db.Create(ctx, &user)
+	require.NoError(t, createResult.Error)
+	require.True(t, user.ID > 0)
+
+	// 2. Act: Update specific fields using a map with DB column names
+	newName := "UpdatedName"
+	newAge := 55
+	// Get DB column names from parsed model
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	ageCol, _ := model.GetFieldByDBName("age")
+	updateData := map[string]any{
+		nameCol.DBName: newName,
+		ageCol.DBName:  newAge,
+		// Email is NOT included in the update map
+	}
+	updateResult := db.Updates(ctx, &user, updateData) // Pass user struct (contains ID) and data map
+
+	// 3. Assert Update Result
+	require.NoError(t, updateResult.Error, "Updates returned an error")
+	assert.EqualValues(t, 1, updateResult.RowsAffected, "Updates should affect 1 row")
+
+	// 4. Assert: Verify using FindByID
+	var updatedUser CreateTestUser
+	findResult := db.FindByID(ctx, &updatedUser, user.ID)
+	require.NoError(t, findResult.Error)
+
+	assert.Equal(t, user.ID, updatedUser.ID)
+	assert.Equal(t, newName, updatedUser.Name, "Name was not updated") // Check updated field
+	assert.Equal(t, newAge, updatedUser.Age, "Age was not updated")    // Check updated field
+	require.NotNil(t, updatedUser.Email, "Email should not have been cleared")
+	assert.Equal(t, initialEmail, *updatedUser.Email, "Email should not have changed") // Check unchanged field
+	assert.False(t, updatedUser.CreatedAt.IsZero(), "CreatedAt should still be set")   // Check unchanged field
+}
+
+func TestDBUpdates_UpdateNullableToNil(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a record with non-nil email
+	initialEmail := "non_nil_to_nil@example.com"
+	user := CreateTestUser{Name: "UpdateToNil", Email: &initialEmail}
+	createResult := db.Create(ctx, &user)
+	require.NoError(t, createResult.Error)
+	require.True(t, user.ID > 0)
+
+	// 2. Act: Update email to nil using map
+	emailCol, _ := model.GetFieldByDBName("email")
+	updateData := map[string]any{
+		emailCol.DBName: nil, // Set value to nil
+	}
+	updateResult := db.Updates(ctx, &user, updateData)
+
+	// 3. Assert Update Result
+	require.NoError(t, updateResult.Error)
+	assert.EqualValues(t, 1, updateResult.RowsAffected)
+
+	// 4. Assert: Verify using FindByID
+	var updatedUser CreateTestUser
+	findResult := db.FindByID(ctx, &updatedUser, user.ID)
+	require.NoError(t, findResult.Error)
+	assert.Nil(t, updatedUser.Email, "Email should now be nil in the struct")
+}
+
+func TestDBUpdates_UpdateNullableToValue(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a record with nil email
+	user := CreateTestUser{Name: "UpdateToVal", Email: nil} // Start with nil
+	createResult := db.Create(ctx, &user)
+	require.NoError(t, createResult.Error)
+	require.True(t, user.ID > 0)
+
+	// 2. Act: Update email to a non-nil value
+	newEmail := "nil_to_val@example.com"
+	emailCol, _ := model.GetFieldByDBName("email")
+	updateData := map[string]any{
+		emailCol.DBName: newEmail,
+	}
+	updateResult := db.Updates(ctx, &user, updateData)
+
+	// 3. Assert Update Result
+	require.NoError(t, updateResult.Error)
+	assert.EqualValues(t, 1, updateResult.RowsAffected)
+
+	// 4. Assert: Verify using FindByID
+	var updatedUser CreateTestUser
+	findResult := db.FindByID(ctx, &updatedUser, user.ID)
+	require.NoError(t, findResult.Error)
+	require.NotNil(t, updatedUser.Email, "Email should now be non-nil")
+	assert.Equal(t, newEmail, *updatedUser.Email)
+}
+
+func TestDBUpdates_NotFound(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+
+	// 1. Arrange: A user struct with a non-existent ID
+	nonExistentUser := CreateTestUser{ID: 999999}
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	updateData := map[string]any{nameCol.DBName: "Doesn't Matter"}
+
+	// 2. Act: Attempt to update
+	updateResult := db.Updates(ctx, &nonExistentUser, updateData)
+
+	// 3. Assert
+	require.NoError(t, updateResult.Error, "Updates should not return SQL error for not found PK")
+	assert.EqualValues(t, 0, updateResult.RowsAffected, "RowsAffected should be 0 for non-existent PK")
+}
+
+func TestDBUpdates_EmptyDataMap(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a user
+	user := CreateTestUser{Name: "NoUpdateData"}
+	createResult := db.Create(ctx, &user)
+	require.NoError(t, createResult.Error)
+	require.True(t, user.ID > 0)
+
+	// 2. Act: Attempt update with empty map
+	updateData := map[string]any{}
+	updateResult := db.Updates(ctx, &user, updateData)
+
+	// 3. Assert: Expect an error because no fields were provided for update
+	require.Error(t, updateResult.Error, "Updates should return error for empty data map")
+	assert.Contains(t, updateResult.Error.Error(), "no valid fields provided for update")
+}
+
+func TestDBUpdates_InvalidColumnName(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a user
+	user := CreateTestUser{Name: "InvalidColUpdate"}
+	createResult := db.Create(ctx, &user)
+	require.NoError(t, createResult.Error)
+	require.True(t, user.ID > 0)
+
+	// 2. Act: Attempt update with invalid column name in map
+	updateData := map[string]any{"invalid_column_name": "some_value"}
+	updateResult := db.Updates(ctx, &user, updateData)
+
+	// 3. Assert: Expect an error because column name is not valid
+	require.Error(t, updateResult.Error, "Updates should return error for invalid column name")
+	assert.Contains(t, updateResult.Error.Error(), "invalid column name 'invalid_column_name'")
+}
+
+func TestDBUpdates_AttemptUpdatePK(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a user
+	user := CreateTestUser{Name: "UpdatePKAttempt"}
+	createResult := db.Create(ctx, &user)
+	require.NoError(t, createResult.Error)
+	require.True(t, user.ID > 0)
+	originalID := user.ID
+
+	// 2. Act: Attempt update including the PK column and another valid column
+	pkCol, _ := model.GetFieldByDBName("id")
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	updateData := map[string]any{
+		pkCol.DBName:   originalID + 100, // Attempt to change PK
+		nameCol.DBName: "NewNameForPKTest",
+	}
+	updateResult := db.Updates(ctx, &user, updateData)
+
+	// 3. Assert: Should succeed, but only update Name, skipping PK. RowsAffected should be 1.
+	require.NoError(t, updateResult.Error, "Updates should skip PK and succeed if other fields are valid")
+	assert.EqualValues(t, 1, updateResult.RowsAffected, "Updates should affect 1 row even when skipping PK")
+
+	// 4. Verify: Fetch and check that ID didn't change, but Name did
+	var updatedUser CreateTestUser
+	findResult := db.FindByID(ctx, &updatedUser, originalID)
+	require.NoError(t, findResult.Error)
+	assert.Equal(t, originalID, updatedUser.ID, "Primary Key should NOT have been updated")
+	assert.Equal(t, "NewNameForPKTest", updatedUser.Name, "Name field should have been updated")
+}
+
+func TestDBUpdates_ZeroPKInput(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+
+	// 1. Arrange: User struct with zero ID
+	zeroPKUser := CreateTestUser{ID: 0, Name: "ZeroPK"}
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	updateData := map[string]any{nameCol.DBName: "NewNameIrrelevant"}
+
+	// 2. Act: Attempt update
+	updateResult := db.Updates(ctx, &zeroPKUser, updateData)
+
+	// 3. Assert: Expect error due to zero PK
+	require.Error(t, updateResult.Error, "Updates should return error for zero PK input")
+	assert.Contains(t, updateResult.Error.Error(), "primary key field")
+	assert.Contains(t, updateResult.Error.Error(), "zero value")
+}
+
+// TODO: Add test for FindFirst without conditions (if desired)
+// TODO: Add test for FindFirst with query-by-example struct having zero values (should they be ignored?)
 // TODO: Add more test cases for Create:
 // - TestDBCreate_NilInput
 // - TestDBCreate_NonPointerInput
