@@ -58,6 +58,91 @@ func (db *DB) GetDataSource() common.DataSource {
 	return db.source
 }
 
+func (db *DB) GetModel(value any) (*schema.Model, error) {
+	if db.parser == nil {
+		return nil, fmt.Errorf("internal error: db instance has no schema parser")
+	}
+	return db.parser.Parse(value) // Delegate to the internal parser
+}
+
+// --- AutoMigrate Method ---
+
+// AutoMigrate runs schema migrations for the given struct types.
+// Currently, it only attempts to CREATE TABLE IF NOT EXISTS.
+// It does NOT handle table alterations (dropping/adding/modifying columns/indexes).
+func (db *DB) AutoMigrate(ctx context.Context, values ...any) error {
+	dialect := db.source.Dialect()
+
+	for _, value := range values {
+		model, err := db.parser.Parse(value)
+		if err != nil {
+			return fmt.Errorf("automigrate: failed to parse schema for type %T: %w", value, err)
+		}
+
+		tableName := dialect.Quote(model.TableName)
+		fmt.Printf("AutoMigrate: Ensuring table %s exists for model %s...\n", tableName, model.Name)
+
+		var columnDefs []string
+		var primaryKeyNames []string
+
+		for _, field := range model.Fields {
+			if field.IsIgnored {
+				continue
+			}
+
+			// Get column type definition using the dialect's refined GetDataType
+			colType, err := dialect.GetDataType(field)
+			if err != nil {
+				return fmt.Errorf("automigrate: failed to get data type for field %s.%s: %w", model.Name, field.GoName, err)
+			}
+
+			columnDefs = append(columnDefs, fmt.Sprintf("%s %s", dialect.Quote(field.DBName), colType))
+
+			if field.IsPrimaryKey {
+				primaryKeyNames = append(primaryKeyNames, dialect.Quote(field.DBName))
+			}
+			// TODO: Handle UNIQUE constraints defined directly via GetDataType? Or add separately?
+		}
+
+		if len(columnDefs) == 0 {
+			fmt.Printf("AutoMigrate: Skipping model %s, no migratable fields found.\n", model.Name)
+			continue
+		}
+
+		// Add composite primary key constraint if multiple PKs defined
+		if len(primaryKeyNames) > 1 {
+			// If more than one field is marked as PK, add a separate composite key constraint.
+			// Assumes GetDataType does NOT add PRIMARY KEY inline in this composite case
+			// (or we would need to modify GetDataType too). Let's assume GetDataType only adds PK inline for single PKs.
+			pkConstraint := fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(primaryKeyNames, ", "))
+			columnDefs = append(columnDefs, pkConstraint)
+			fmt.Printf("AutoMigrate: Adding composite primary key constraint for %s.\n", model.Name)
+		}
+		// Assemble CREATE TABLE statement
+		createTableSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s);",
+			tableName,
+			strings.Join(columnDefs, ", "),
+		)
+
+		// Execute CREATE TABLE statement
+		fmt.Printf("AutoMigrate: Executing: %s\n", createTableSQL) // Log the SQL
+		_, err = db.source.Exec(ctx, createTableSQL)
+		if err != nil {
+			return fmt.Errorf("automigrate: failed to create/ensure table %s for model %s: %w", tableName, model.Name, err)
+		}
+
+		// TODO: Index Creation - requires iterating model.Indexes and generating CREATE INDEX SQL
+		// for _, index := range model.Indexes {
+		//     // Generate CREATE (UNIQUE) INDEX sql using dialect
+		//     // Execute index creation SQL
+		// }
+
+		fmt.Printf("AutoMigrate: Table %s ensured for model %s.\n", tableName, model.Name)
+	} // end loop through values
+
+	return nil
+}
+
 // *** IMPLEMENT Create Method ***
 func (db *DB) Create(ctx context.Context, value any) *Result {
 	result := &Result{} // Initialize result object

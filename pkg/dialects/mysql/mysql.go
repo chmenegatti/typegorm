@@ -79,15 +79,20 @@ func (d mysqlDialect) GetDataType(field *schema.Field) (string, error) {
 		return strings.TrimSpace(sqlType + " " + strings.Join(constraints, " ")), nil
 	}
 
-	// 2. Infer from Go type if no override
+	// 2. Infer from Go type
 	var baseType string
-	goKind := field.GoType.Kind()
-	// Handle pointer types - get the underlying element type's kind
-	if goKind == reflect.Pointer {
-		goKind = field.GoType.Elem().Kind()
+	goType := field.GoType // Use the type directly from the field
+
+	// Determine the kind, handling pointers specifically for the switch
+	kind := goType.Kind()
+	underlyingKind := kind
+	underlyingType := goType
+	if kind == reflect.Pointer {
+		underlyingType = goType.Elem()
+		underlyingKind = underlyingType.Kind()
 	}
 
-	switch goKind {
+	switch underlyingKind {
 	case reflect.String:
 		if field.Size > 0 && field.Size < 65535 {
 			baseType = fmt.Sprintf("VARCHAR(%d)", field.Size)
@@ -118,14 +123,14 @@ func (d mysqlDialect) GetDataType(field *schema.Field) (string, error) {
 	case reflect.Float64:
 		baseType = "DOUBLE"
 	case reflect.Struct:
-		// Handle time.Time specifically
-		if field.GoType == reflect.TypeOf(time.Time{}) || field.GoType == reflect.TypeOf((*time.Time)(nil)).Elem() {
-			baseType = "DATETIME(6)" // Store with microsecond precision
+		// *** NEW CHECK: Use underlyingType ***
+		var timeType = reflect.TypeOf(time.Time{})
+		// Check if the underlying type (after pointer dereference) is time.Time
+		if underlyingType == timeType {
+			baseType = "DATETIME(6)"
 		} else {
-			// TODO: Handle other structs like sql.Null*?
-			// Need to check field.GoType.PkgPath() and field.GoType.Name()
-			// Example: sql.NullString -> VARCHAR or TEXT based on size/tags, allow NULL
-			return "", fmt.Errorf("unsupported struct type for mysql: %s", field.GoType.String())
+			// TODO: Handle sql.Null* types (e.g., check underlyingType.PkgPath() and .Name())
+			return "", fmt.Errorf("unsupported struct type for mysql: %s", goType.String())
 		}
 	case reflect.Slice:
 		// Assume []byte for BLOB/BINARY types
@@ -140,7 +145,7 @@ func (d mysqlDialect) GetDataType(field *schema.Field) (string, error) {
 			return "", fmt.Errorf("unsupported slice type for mysql: %s", field.GoType.String())
 		}
 	default:
-		return "", fmt.Errorf("unsupported go type kind for mysql: %s", goKind)
+		return "", fmt.Errorf("unsupported go type kind for mysql: %s", underlyingKind)
 	}
 
 	// 3. Add constraints

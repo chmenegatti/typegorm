@@ -73,7 +73,7 @@ func (p *Parser) Parse(value any) (*Model, error) {
 		PrimaryKeys:    make([]*Field, 0),
 		Indexes:        make([]*Index, 0),
 		instance:       reflect.New(structType).Interface(),
-		namingStrategy: p.namingStrategy,
+		NamingStrategy: p.namingStrategy,
 	}
 	model.TableName = p.namingStrategy.TableName(model.Name)
 

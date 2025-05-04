@@ -78,7 +78,7 @@ type Model struct {
 	// --- Internal ---
 	instance       any            // Keep a zero-value instance for creating new objects (optional)
 	mux            sync.RWMutex   // For thread-safe access if modified after parse (unlikely)
-	namingStrategy NamingStrategy // Naming strategy used during parsing
+	NamingStrategy NamingStrategy // Naming strategy used during parsing
 }
 
 // Helper methods for Model
