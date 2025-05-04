@@ -1006,55 +1006,211 @@ func (db *DB) Begin(ctx context.Context, opts ...*sql.TxOptions) (*Tx, error) {
 
 // --- Helper: buildWhereClause (extracted from FindFirst) ---
 
+// --- Package-Level Helper: buildWhereClause ---
+
 // buildWhereClause constructs the WHERE clause parts based on conditions.
-// Returns slice of clauses, slice of args, and error.
-// buildWhereClause constructs the WHERE clause parts based on conditions.
-// Moved outside DB/Tx struct to be reusable.
+// Supports struct pointer (query-by-example) or map[string]any (with operator suffixes).
 func buildWhereClause(dialect common.Dialect, model *schema.Model, condition any) ([]string, []any, error) {
 	whereClauses := []string{}
 	whereArgs := []any{}
-	// *** FIXED: Handle nil condition explicitly ***
+
 	if condition == nil {
 		return whereClauses, whereArgs, nil // No conditions to build
 	}
 
 	queryValue := reflect.ValueOf(condition)
+
 	if queryValue.Kind() == reflect.Pointer && queryValue.Elem().Kind() == reflect.Struct {
+		// --- Query by Struct Pointer (Non-Zero Fields = Equality) ---
 		queryStruct := queryValue.Elem()
 		for i := 0; i < queryStruct.NumField(); i++ {
 			fieldValue := queryStruct.Field(i)
-			if fieldValue.IsValid() && !fieldValue.IsZero() {
+			if fieldValue.IsValid() && !fieldValue.IsZero() { // Only use non-zero fields
 				goFieldName := queryStruct.Type().Field(i).Name
 				schemaField, ok := model.GetField(goFieldName)
 				if !ok || schemaField.IsIgnored {
 					continue
 				}
-				whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", dialect.Quote(schemaField.DBName), dialect.BindVar(len(whereArgs)+1)))
+				clause := fmt.Sprintf("%s = %s", dialect.Quote(schemaField.DBName), dialect.BindVar(len(whereArgs)+1))
+				whereClauses = append(whereClauses, clause)
 				whereArgs = append(whereArgs, fieldValue.Interface())
 			}
 		}
 	} else if queryValue.Kind() == reflect.Map {
+		// --- Query by Map (Key = "column [OPERATOR]", Value = argument(s)) ---
 		iter := queryValue.MapRange()
 		for iter.Next() {
 			key := iter.Key()
-			value := iter.Value()
+			value := iter.Value() // reflect.Value
+
 			if key.Kind() != reflect.String {
-				return nil, nil, fmt.Errorf("map condition keys must be strings (column names), got %s", key.Kind())
+				return nil, nil, fmt.Errorf("map condition keys must be strings (column [operator]), got %s", key.Kind())
 			}
-			dbColName := key.String()
-			schemaField, ok := model.GetFieldByDBName(dbColName)
+			keyStr := key.String()
+
+			// Parse key for column name and operator
+			columnName, operator, err := parseConditionKey(keyStr)
+			if err != nil {
+				return nil, nil, err
+			} // Error parsing key format
+
+			// Validate column name
+			schemaField, ok := model.GetFieldByDBName(columnName)
 			if !ok {
-				return nil, nil, fmt.Errorf("invalid column name '%s' in map condition for model %s", dbColName, model.Name)
+				return nil, nil, fmt.Errorf("invalid column name '%s' in map condition for model %s", columnName, model.Name)
 			}
 			if schemaField.IsIgnored {
 				continue
+			} // Skip ignored fields
+
+			// Build clause based on operator
+			quotedColumn := dialect.Quote(schemaField.DBName)
+			clause, argCount, err := buildOperatorClause(dialect, quotedColumn, operator, value)
+			if err != nil {
+				return nil, nil, fmt.Errorf("error building clause for '%s': %w", keyStr, err)
 			}
-			whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", dialect.Quote(dbColName), dialect.BindVar(len(whereArgs)+1)))
-			whereArgs = append(whereArgs, value.Interface())
+
+			whereClauses = append(whereClauses, clause)
+
+			// Append arguments
+			if argCount > 0 {
+				if operator == "in" || operator == "not in" { // Special handling for IN clause args
+					sliceValue := reflect.ValueOf(value.Interface()) // Get underlying slice
+					if sliceValue.Kind() != reflect.Slice {
+						return nil, nil, fmt.Errorf("value for operator '%s' must be a slice, got %T", operator, value.Interface())
+					}
+					for i := 0; i < sliceValue.Len(); i++ {
+						whereArgs = append(whereArgs, sliceValue.Index(i).Interface())
+					}
+				} else if argCount == 1 {
+					whereArgs = append(whereArgs, value.Interface())
+				}
+				// Add other multi-arg operators like BETWEEN later if needed
+			}
 		}
 	} else {
-		// Error should only trigger if condition is non-nil and not struct ptr or map
 		return nil, nil, fmt.Errorf("unsupported condition type: %T. Expecting struct pointer or map[string]any", condition)
 	}
 	return whereClauses, whereArgs, nil
+}
+
+// parseConditionKey splits "column_name OPERATOR" into parts.
+func parseConditionKey(key string) (column string, operator string, err error) {
+	key = strings.TrimSpace(key)
+	parts := strings.Fields(key) // Split by whitespace
+
+	if len(parts) == 1 {
+		return parts[0], "=", nil // Default to equality
+	}
+	if len(parts) >= 2 {
+		// Check if the last part is a known operator
+		lastPart := strings.ToLower(parts[len(parts)-1])
+		secondLastPart := ""
+		if len(parts) >= 3 {
+			secondLastPart = strings.ToLower(parts[len(parts)-2])
+		}
+
+		// Handle two-word operators first
+		if secondLastPart == "is" && lastPart == "null" {
+			return strings.Join(parts[:len(parts)-2], " "), "is null", nil
+		}
+		if secondLastPart == "is" && lastPart == "not" && len(parts) >= 4 && strings.ToLower(parts[len(parts)-3]) == "null" {
+			// This case is unlikely ("col is not null": true), handle "is not null" operator instead
+			return "", "", fmt.Errorf("use 'IS NOT NULL' operator suffix instead of 'IS NOT NULL' in key")
+		}
+		if secondLastPart == "not" && lastPart == "in" {
+			return strings.Join(parts[:len(parts)-2], " "), "not in", nil
+		}
+		if secondLastPart == "is" && lastPart == "not" { // Check for "IS NOT NULL"
+			if len(parts) > 2 && strings.ToLower(parts[len(parts)-3]) == "null" {
+				// This syntax is awkward, prefer "col IS NOT NULL" as operator suffix
+				return "", "", fmt.Errorf("use 'IS NOT NULL' operator suffix instead of putting IS NOT NULL in key")
+			}
+			// If not "IS NOT NULL", maybe just "IS NOT"? Treat as equality for now or error? Let's error.
+			return "", "", fmt.Errorf("unsupported operator combination 'IS NOT' in key: %s", key)
+
+		}
+
+		// Handle single-word operators
+		knownOperators := map[string]bool{
+			">": true, "<": true, ">=": true, "<=": true, "!=": true, "<>": true, // <> is alias for !=
+			"like": true, "in": true, "is null": true, "is not null": true,
+		}
+		// Combine "is null" and "is not null" back for map lookup
+		opCheck := lastPart
+		fullOpCheck := ""
+		if secondLastPart == "is" && lastPart == "null" {
+			fullOpCheck = "is null"
+		}
+		if secondLastPart == "is" && lastPart == "not" && len(parts) >= 3 && strings.ToLower(parts[len(parts)-3]) == "null" {
+			// Covered above, but defensive check
+			fullOpCheck = "is not null" // This won't match map key
+		}
+		if secondLastPart == "not" && lastPart == "in" {
+			fullOpCheck = "not in"
+		}
+
+		if knownOperators[opCheck] || knownOperators[fullOpCheck] {
+			finalOp := opCheck
+			colParts := parts[:len(parts)-1]
+			if fullOpCheck != "" {
+				finalOp = fullOpCheck
+				colParts = parts[:len(parts)-2] // Use parts before the two-word op
+			}
+			return strings.Join(colParts, " "), finalOp, nil
+		}
+	}
+	// If not parsed as operator, assume the whole key is the column name
+	return key, "=", nil
+}
+
+// buildOperatorClause generates the SQL clause part for a given operator.
+// Returns the clause string (e.g., "> ?"), the number of arguments expected (0, 1, or N for IN), and error.
+func buildOperatorClause(dialect common.Dialect, quotedColumn, operator string, value reflect.Value) (clause string, argCount int, err error) {
+	opLower := strings.ToLower(operator)
+	switch opLower {
+	case "=", ">", "<", ">=", "<=", "!=", "<>":
+		clause = fmt.Sprintf("%s %s %s", quotedColumn, operator, dialect.BindVar(1))
+		argCount = 1
+	case "like":
+		clause = fmt.Sprintf("%s LIKE %s", quotedColumn, dialect.BindVar(1))
+		argCount = 1
+	case "in", "not in":
+		// Value must be a slice
+		if value.Kind() != reflect.Slice {
+			return "", 0, fmt.Errorf("value for '%s' operator must be a slice, got %T", operator, value.Interface())
+		}
+		sliceLen := value.Len()
+		if sliceLen == 0 {
+			// Handle empty slice for IN/NOT IN
+			if opLower == "in" {
+				// "col IN ()" is often invalid or means false, return a clause that's always false
+				clause = "1 = 0" // Or specific DB equivalent if needed
+				argCount = 0
+			} else { // NOT IN ()
+				// "col NOT IN ()" is always true
+				clause = "1 = 1" // Or specific DB equivalent if needed
+				argCount = 0
+			}
+		} else {
+			placeholders := make([]string, sliceLen)
+			for i := 0; i < sliceLen; i++ {
+				placeholders[i] = dialect.BindVar(i + 1) // Placeholders are relative to this clause's args
+			}
+			inNotIn := "IN"
+			if opLower == "not in" {
+				inNotIn = "NOT IN"
+			}
+			clause = fmt.Sprintf("%s %s (%s)", quotedColumn, inNotIn, strings.Join(placeholders, ", "))
+			argCount = sliceLen
+		}
+	case "is null", "is not null":
+		// Value is ignored, check boolean? No, presence of key implies intent.
+		clause = fmt.Sprintf("%s %s", quotedColumn, strings.ToUpper(operator))
+		argCount = 0
+	// TODO: Add BETWEEN operator (would need 2 args)
+	default:
+		return "", 0, fmt.Errorf("unsupported operator: %s", operator)
+	}
+	return clause, argCount, nil
 }

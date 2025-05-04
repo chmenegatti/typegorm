@@ -1043,3 +1043,197 @@ func TestDBFind_LimitOffsetOrder(t *testing.T) {
 	assert.Equal(t, "David", users[1].Name) // Second user after offset
 	assert.Equal(t, 35, users[1].Age)
 }
+
+// --- NEW Tests for DB.Find with Query Operators ---
+
+// Helper to create users for operator tests
+func createOperatorTestUsers(ctx context.Context, t *testing.T, db *DB) map[string]CreateTestUser {
+	users := map[string]CreateTestUser{
+		"Alice": {Name: "Alice", Age: 30, Email: ptr("alice@example.com")},
+		"Bob":   {Name: "Bob", Age: 40, Email: ptr("bob@example.com")},
+		"Carol": {Name: "Carol", Age: 35, Email: ptr("carol@example.com")},
+		"David": {Name: "David", Age: 35, Email: nil}, // Null email
+	}
+	for name, user := range users {
+		u := user // Create local copy for pointer
+		res := db.Create(ctx, &u)
+		require.NoError(t, res.Error, "Failed to create user %s for operator test", name)
+		users[name] = u // Update map with the user containing the ID
+	}
+	return users
+}
+
+// Helper function to create a pointer to a string
+func ptr(s string) *string { return &s }
+
+func TestDBFind_Operator_Comparison(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOperatorTestUsers(ctx, t, db)
+	ageCol, _ := model.GetFieldByDBName("age")
+
+	// Test >
+	var usersGt []CreateTestUser
+	resGt := db.Find(ctx, &usersGt, map[string]any{fmt.Sprintf("%s >", ageCol.DBName): 35})
+	require.NoError(t, resGt.Error)
+	require.Len(t, usersGt, 1)
+	assert.Equal(t, "Bob", usersGt[0].Name)
+
+	// Test >=
+	var usersGte []CreateTestUser
+	resGte := db.Find(ctx, &usersGte, map[string]any{fmt.Sprintf("%s >=", ageCol.DBName): 35}, Order("user_name ASC"))
+	require.NoError(t, resGte.Error)
+	require.Len(t, usersGte, 3)
+	assert.Equal(t, "Bob", usersGte[0].Name)   // 40
+	assert.Equal(t, "Carol", usersGte[1].Name) // 35
+	assert.Equal(t, "David", usersGte[2].Name) // 35
+
+	// Test <
+	var usersLt []CreateTestUser
+	resLt := db.Find(ctx, &usersLt, map[string]any{fmt.Sprintf("%s <", ageCol.DBName): 35})
+	require.NoError(t, resLt.Error)
+	require.Len(t, usersLt, 1)
+	assert.Equal(t, "Alice", usersLt[0].Name)
+
+	// Test <=
+	var usersLte []CreateTestUser
+	resLte := db.Find(ctx, &usersLte, map[string]any{fmt.Sprintf("%s <=", ageCol.DBName): 35}, Order("user_name ASC"))
+	require.NoError(t, resLte.Error)
+	require.Len(t, usersLte, 3)
+	assert.Equal(t, "Alice", usersLte[0].Name) // 30
+	assert.Equal(t, "Carol", usersLte[1].Name) // 35
+	assert.Equal(t, "David", usersLte[2].Name) // 35
+
+	// Test != or <>
+	var usersNe []CreateTestUser
+	resNe := db.Find(ctx, &usersNe, map[string]any{fmt.Sprintf("%s !=", ageCol.DBName): 35}, Order("user_name ASC"))
+	require.NoError(t, resNe.Error)
+	require.Len(t, usersNe, 2)
+	assert.Equal(t, "Alice", usersNe[0].Name) // 30
+	assert.Equal(t, "Bob", usersNe[1].Name)   // 40
+}
+
+func TestDBFind_Operator_Like(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOperatorTestUsers(ctx, t, db)
+	nameCol, _ := model.GetFieldByDBName("user_name")
+
+	// Test LIKE 'A%'
+	var usersLikeA []CreateTestUser
+	resLikeA := db.Find(ctx, &usersLikeA, map[string]any{fmt.Sprintf("%s LIKE", nameCol.DBName): "A%"})
+	require.NoError(t, resLikeA.Error)
+	require.Len(t, usersLikeA, 1)
+	assert.Equal(t, "Alice", usersLikeA[0].Name)
+
+	// Test LIKE '%o%'
+	var usersLikeO []CreateTestUser
+	resLikeO := db.Find(ctx, &usersLikeO, map[string]any{fmt.Sprintf("%s LIKE", nameCol.DBName): "%o%"}, Order("user_name ASC"))
+	require.NoError(t, resLikeO.Error)
+	require.Len(t, usersLikeO, 2)
+	assert.Equal(t, "Bob", usersLikeO[0].Name)
+	assert.Equal(t, "Carol", usersLikeO[1].Name)
+}
+
+func TestDBFind_Operator_In(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOperatorTestUsers(ctx, t, db)
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	ageCol, _ := model.GetFieldByDBName("age")
+
+	// Test IN Names
+	var usersInNames []CreateTestUser
+	namesToFind := []string{"Alice", "Carol", "Missing"}
+	resInNames := db.Find(ctx, &usersInNames, map[string]any{fmt.Sprintf("%s IN", nameCol.DBName): namesToFind}, Order("user_name ASC"))
+	require.NoError(t, resInNames.Error)
+	require.Len(t, usersInNames, 2)
+	assert.Equal(t, "Alice", usersInNames[0].Name)
+	assert.Equal(t, "Carol", usersInNames[1].Name)
+
+	// Test IN Ages
+	var usersInAges []CreateTestUser
+	agesToFind := []int{35, 40}
+	resInAges := db.Find(ctx, &usersInAges, map[string]any{fmt.Sprintf("%s IN", ageCol.DBName): agesToFind}, Order("user_name ASC"))
+	require.NoError(t, resInAges.Error)
+	require.Len(t, usersInAges, 3)
+	assert.Equal(t, "Bob", usersInAges[0].Name)   // 40
+	assert.Equal(t, "Carol", usersInAges[1].Name) // 35
+	assert.Equal(t, "David", usersInAges[2].Name) // 35
+
+	// Test IN with empty slice (should find none)
+	var usersInEmpty []CreateTestUser
+	resInEmpty := db.Find(ctx, &usersInEmpty, map[string]any{fmt.Sprintf("%s IN", nameCol.DBName): []string{}})
+	require.NoError(t, resInEmpty.Error)
+	assert.Empty(t, usersInEmpty)
+}
+
+func TestDBFind_Operator_NotIn(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOperatorTestUsers(ctx, t, db)
+	nameCol, _ := model.GetFieldByDBName("user_name")
+
+	// Test NOT IN Names
+	var usersNotInNames []CreateTestUser
+	namesToExclude := []string{"Bob", "David"}
+	resNotInNames := db.Find(ctx, &usersNotInNames, map[string]any{fmt.Sprintf("%s NOT IN", nameCol.DBName): namesToExclude}, Order("user_name ASC"))
+	require.NoError(t, resNotInNames.Error)
+	require.Len(t, usersNotInNames, 2)
+	assert.Equal(t, "Alice", usersNotInNames[0].Name)
+	assert.Equal(t, "Carol", usersNotInNames[1].Name)
+
+	// Test NOT IN with empty slice (should find all)
+	var usersNotInEmpty []CreateTestUser
+	resNotInEmpty := db.Find(ctx, &usersNotInEmpty, map[string]any{fmt.Sprintf("%s NOT IN", nameCol.DBName): []string{}})
+	require.NoError(t, resNotInEmpty.Error)
+	assert.Len(t, usersNotInEmpty, 4)
+}
+
+func TestDBFind_Operator_IsNull(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOperatorTestUsers(ctx, t, db) // David has NULL email
+	emailCol, _ := model.GetFieldByDBName("email")
+
+	// Test IS NULL
+	var usersNullEmail []CreateTestUser
+	// Value for IS NULL doesn't matter, presence of key is enough
+	resIsNull := db.Find(ctx, &usersNullEmail, map[string]any{fmt.Sprintf("%s IS NULL", emailCol.DBName): true})
+	require.NoError(t, resIsNull.Error)
+	require.Len(t, usersNullEmail, 1)
+	assert.Equal(t, "David", usersNullEmail[0].Name)
+	assert.Nil(t, usersNullEmail[0].Email)
+}
+
+func TestDBFind_Operator_IsNotNull(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOperatorTestUsers(ctx, t, db) // Alice, Bob, Carol have non-NULL email
+	emailCol, _ := model.GetFieldByDBName("email")
+
+	// Test IS NOT NULL
+	var usersNotNullEmail []CreateTestUser
+	resIsNotNull := db.Find(ctx, &usersNotNullEmail, map[string]any{fmt.Sprintf("%s IS NOT NULL", emailCol.DBName): true}, Order("user_name ASC"))
+	require.NoError(t, resIsNotNull.Error)
+	require.Len(t, usersNotNullEmail, 3)
+	assert.Equal(t, "Alice", usersNotNullEmail[0].Name)
+	assert.Equal(t, "Bob", usersNotNullEmail[1].Name)
+	assert.Equal(t, "Carol", usersNotNullEmail[2].Name)
+	assert.NotNil(t, usersNotNullEmail[0].Email)
+}
+
+func TestDBFind_Operator_Multiple(t *testing.T) {
+	ctx, db, model := setupIntegrationTest(t)
+	_ = createOperatorTestUsers(ctx, t, db)
+	nameCol, _ := model.GetFieldByDBName("user_name")
+	ageCol, _ := model.GetFieldByDBName("age")
+	emailCol, _ := model.GetFieldByDBName("email")
+
+	// Find users where age >= 35 AND email IS NOT NULL
+	var users []CreateTestUser
+	query := map[string]any{
+		fmt.Sprintf("%s >=", ageCol.DBName):            35,
+		fmt.Sprintf("%s IS NOT NULL", emailCol.DBName): true, // Find non-null emails
+	}
+	res := db.Find(ctx, &users, query, Order(fmt.Sprintf("%s ASC", nameCol.DBName)))
+
+	require.NoError(t, res.Error)
+	require.Len(t, users, 2) // Bob (40), Carol (35)
+	assert.Equal(t, "Bob", users[0].Name)
+	assert.Equal(t, "Carol", users[1].Name)
+}
