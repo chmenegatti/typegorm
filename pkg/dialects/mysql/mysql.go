@@ -88,7 +88,7 @@ func (d *mysqlDialect) GetDataType(field *schema.Field) (string, error) {
 	}
 
 	var constraints []string
-	if field.IsPrimary {
+	if field.IsPrimaryKey {
 		constraints = append(constraints, "PRIMARY KEY")
 		// Example: Check for a tag to determine AUTO_INCREMENT
 		// if _, ok := field.Tags.Get("autoIncrement"); ok {
