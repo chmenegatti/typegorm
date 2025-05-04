@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,62 +51,137 @@ func (d *mysqlDialect) BindVar(i int) string {
 	return "?"
 }
 
-func (d *mysqlDialect) GetDataType(field *schema.Field) (string, error) {
-	sqlType := ""
-	// (Your existing GetDataType logic - slightly simplified for brevity)
-	switch field.GoType.Kind() {
+func (d mysqlDialect) GetDataType(field *schema.Field) (string, error) {
+	// 1. Check for explicit SQL type override from tag
+	if field.SQLType != "" {
+		// User specified the exact type (e.g., "VARCHAR(150)", "DECIMAL(10,2)")
+		// We might still need to add constraints like NOT NULL, DEFAULT etc.
+		sqlType := field.SQLType
+		var constraints []string
+		if field.IsRequired {
+			constraints = append(constraints, "NOT NULL")
+		}
+		// Note: DEFAULT, PRIMARY KEY, AUTO_INCREMENT might conflict if already part of SQLType tag.
+		// Let's assume user knows what they are doing if they provide full type.
+		// We *could* try parsing SQLType to separate base type from constraints, but keep simple for now.
+		if field.DefaultValue != nil {
+			// TODO: Improve default value quoting/formatting for different types
+			constraints = append(constraints, fmt.Sprintf("DEFAULT %s", formatDefaultValue(*field.DefaultValue)))
+		}
+		if field.IsPrimaryKey {
+			constraints = append(constraints, "PRIMARY KEY")
+		}
+		if field.AutoIncrement {
+			constraints = append(constraints, "AUTO_INCREMENT")
+		}
+		// Consider adding UNIQUE here too? field.Unique
+
+		return strings.TrimSpace(sqlType + " " + strings.Join(constraints, " ")), nil
+	}
+
+	// 2. Infer from Go type if no override
+	var baseType string
+	goKind := field.GoType.Kind()
+	// Handle pointer types - get the underlying element type's kind
+	if goKind == reflect.Pointer {
+		goKind = field.GoType.Elem().Kind()
+	}
+
+	switch goKind {
 	case reflect.String:
 		if field.Size > 0 && field.Size < 65535 {
-			sqlType = fmt.Sprintf("VARCHAR(%d)", field.Size)
+			baseType = fmt.Sprintf("VARCHAR(%d)", field.Size)
 		} else if field.Size >= 65535 {
-			sqlType = "TEXT" // Or MEDIUMTEXT, LONGTEXT
+			baseType = "TEXT" // Or MEDIUMTEXT, LONGTEXT based on size
 		} else {
-			sqlType = "VARCHAR(255)"
+			// Check if it resembles a UUID based on name? Or require explicit type:text/varchar?
+			// Defaulting to TEXT might be safer than VARCHAR(255) if size is unknown.
+			// Let's default to TEXT if size tag is absent.
+			baseType = "TEXT"
 		}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32:
-		sqlType = "INT"
+	case reflect.Int, reflect.Int32, reflect.Uint, reflect.Uint32, reflect.Int16, reflect.Uint16, reflect.Int8, reflect.Uint8:
+		// Use INT for standard integers unless PK+AutoIncrement suggests BIGINT might be safer?
+		// Let's stick to INT unless it's a PK, maybe. GORM uses INT for uint32 too.
+		baseType = "INT"
+		if field.GoType.Kind() == reflect.Uint || field.GoType.Kind() == reflect.Uint32 || field.GoType.Kind() == reflect.Uint16 || field.GoType.Kind() == reflect.Uint8 {
+			baseType += " UNSIGNED"
+		}
 	case reflect.Int64, reflect.Uint64:
-		sqlType = "BIGINT"
+		baseType = "BIGINT"
+		if field.GoType.Kind() == reflect.Uint64 {
+			baseType += " UNSIGNED"
+		}
 	case reflect.Bool:
-		sqlType = "TINYINT(1)"
+		baseType = "BOOLEAN" // BOOLEAN is an alias for TINYINT(1) in MySQL
 	case reflect.Float32:
-		sqlType = "FLOAT"
+		baseType = "FLOAT"
 	case reflect.Float64:
-		sqlType = "DOUBLE"
+		baseType = "DOUBLE"
 	case reflect.Struct:
-		if field.GoType == reflect.TypeOf(time.Time{}) {
-			// Use DATETIME(6) for microsecond precision compatibility with Go's time.Time
-			sqlType = "DATETIME(6)" // Or TIMESTAMP(6)
+		// Handle time.Time specifically
+		if field.GoType == reflect.TypeOf(time.Time{}) || field.GoType == reflect.TypeOf((*time.Time)(nil)).Elem() {
+			baseType = "DATETIME(6)" // Store with microsecond precision
+		} else {
+			// TODO: Handle other structs like sql.Null*?
+			// Need to check field.GoType.PkgPath() and field.GoType.Name()
+			// Example: sql.NullString -> VARCHAR or TEXT based on size/tags, allow NULL
+			return "", fmt.Errorf("unsupported struct type for mysql: %s", field.GoType.String())
 		}
 	case reflect.Slice:
+		// Assume []byte for BLOB/BINARY types
 		if field.GoType.Elem().Kind() == reflect.Uint8 {
-			sqlType = "BLOB"
+			if field.Size > 0 && field.Size < 65535 {
+				baseType = fmt.Sprintf("VARBINARY(%d)", field.Size)
+			} else {
+				// Default to BLOB, could refine to MEDIUMBLOB/LONGBLOB based on Size tag
+				baseType = "BLOB"
+			}
+		} else {
+			return "", fmt.Errorf("unsupported slice type for mysql: %s", field.GoType.String())
 		}
+	default:
+		return "", fmt.Errorf("unsupported go type kind for mysql: %s", goKind)
 	}
 
-	if sqlType == "" {
-		return "", fmt.Errorf("unsupported data type for mysql: %s", field.GoType.Kind())
-	}
-
+	// 3. Add constraints
 	var constraints []string
-	if field.IsPrimaryKey {
-		constraints = append(constraints, "PRIMARY KEY")
-		// Example: Check for a tag to determine AUTO_INCREMENT
-		// if _, ok := field.Tags.Get("autoIncrement"); ok {
-		// 	constraints = append(constraints, "AUTO_INCREMENT")
-		// }
-	}
-	if field.IsRequired { // Assuming IsRequired means NOT NULL
+	if field.IsRequired {
 		constraints = append(constraints, "NOT NULL")
 	}
-	// Add default, unique etc. based on Field properties or tags
-	if field.DefaultValue != nil {
-		// Warning: Ensure DefaultValue is properly formatted/quoted SQL literal
-		constraints = append(constraints, fmt.Sprintf("DEFAULT %s", *field.DefaultValue))
+	if field.IsPrimaryKey {
+		constraints = append(constraints, "PRIMARY KEY")
 	}
-	// if field.IsUnique { constraints = append(constraints, "UNIQUE") }
+	if field.AutoIncrement {
+		constraints = append(constraints, "AUTO_INCREMENT")
+	}
+	if field.Unique {
+		constraints = append(constraints, "UNIQUE")
+	} // Simple column unique constraint
+	if field.DefaultValue != nil {
+		// Basic default value formatting - THIS IS HARD TO GET RIGHT generically
+		constraints = append(constraints, fmt.Sprintf("DEFAULT %s", formatDefaultValue(*field.DefaultValue)))
+	}
 
-	return strings.TrimSpace(sqlType + " " + strings.Join(constraints, " ")), nil
+	return strings.TrimSpace(baseType + " " + strings.Join(constraints, " ")), nil
+}
+
+// formatDefaultValue attempts to format a default value string as an SQL literal.
+// WARNING: This is a basic attempt and may not cover all edge cases or types correctly.
+// Databases differ in how defaults (especially functions like NOW()) are specified.
+func formatDefaultValue(value string) string {
+	// Keep common function calls unquoted
+	upperVal := strings.ToUpper(value)
+	if upperVal == "CURRENT_TIMESTAMP" || upperVal == "NOW()" || upperVal == "NULL" {
+		return value // Assume it's a function or keyword
+	}
+	// Try to detect if it's purely numeric (int or float)
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return value // Assume it's a number, don't quote
+	}
+	// Otherwise, assume it's a string and quote it
+	// Replace single quotes with escaped single quotes for SQL
+	escapedValue := strings.ReplaceAll(value, "'", "''")
+	return "'" + escapedValue + "'"
 }
 
 // --- NEW: Migration History Table SQL Generation Methods ---

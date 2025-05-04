@@ -151,7 +151,24 @@ func (p *Parser) Parse(value any) (*Model, error) {
 
 		// Collect primary keys
 		if field.IsPrimaryKey {
+			field.IsRequired = true
+			field.Nullable = false // Ensure Nullable is false for PKs
 			model.PrimaryKeys = append(model.PrimaryKeys, field)
+		} else {
+			// 2. For non-PK fields, respect the "not null" tag first.
+			if field.IsRequired { // Was set by "not null" tag
+				field.Nullable = false
+			}
+			// 3. Then, respect the "null" tag (explicitly allowing null).
+			if field.Nullable { // Set by "null" tag OR inferred from pointer type
+				field.IsRequired = false // Explicit "null" overrides any default required status
+			}
+			// 4. Default for non-PK, non-pointer/nullable-type fields without tags:
+			// If field.Nullable is still false (e.g., int, string, bool, time.Time)
+			// and field.IsRequired is false (no "not null" tag), we imply NOT NULL.
+			if !field.Nullable && !field.IsRequired {
+				field.IsRequired = true // Default basic value types to NOT NULL
+			}
 		}
 
 		// Collect index information temporarily
@@ -178,6 +195,7 @@ func (p *Parser) Parse(value any) (*Model, error) {
 			} else {
 				indexesMap[indexName] = &Index{Name: indexName, IsUnique: false, Fields: []*Field{field}}
 			}
+			indexesByName[indexName] = append(indexesByName[indexName], field)
 		}
 		// Process NAMED unique indexes
 		for _, uniqueIndexName := range field.UniqueIndexNames {
