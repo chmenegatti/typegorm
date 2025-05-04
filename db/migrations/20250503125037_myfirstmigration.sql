@@ -3,7 +3,7 @@
 
 -- +migrate Up
 -- SQL in this section is executed when migrating Up.
-
+  
 
 
 -- +migrate Down
