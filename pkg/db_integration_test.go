@@ -7,6 +7,8 @@ package typegorm
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -171,6 +173,129 @@ func TestDBCreate_Success_AutoIncrement(t *testing.T) {
 	assert.Equal(t, user.Age, dbUser.Age)
 	assert.False(t, dbUser.CreatedAt.IsZero(), "CreatedAt should be set in DB")
 	assert.Nil(t, dbUser.UpdatedAt, "UpdatedAt should be nil in DB") // Assuming DB default isn't set
+}
+
+// *** NEW Test for FindByID Success ***
+func TestDBFindByID_Success(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t) // We don't need the model back here directly
+
+	// 1. Arrange: Create a record first
+	userName := "FindMeUser"
+	userEmail := fmt.Sprintf("findme_%d@example.com", time.Now().UnixNano())
+	originalUser := CreateTestUser{
+		Name:  userName,
+		Email: &userEmail,
+		Age:   42,
+	}
+	createResult := db.Create(ctx, &originalUser)
+	require.NoError(t, createResult.Error, "Setup: Failed to create user for FindByID test")
+	require.True(t, originalUser.ID > 0, "Setup: Created user should have an ID")
+
+	// 2. Act: Find the record by its ID
+	var foundUser CreateTestUser                                // Create a new variable to scan into
+	findResult := db.FindByID(ctx, &foundUser, originalUser.ID) // Pass pointer and ID
+
+	// 3. Assert
+	require.NoError(t, findResult.Error, "FindByID returned an error")
+	assert.Equal(t, originalUser.ID, foundUser.ID, "Found user ID mismatch")
+	assert.Equal(t, originalUser.Name, foundUser.Name, "Found user Name mismatch")
+	require.NotNil(t, foundUser.Email, "Found user Email should not be nil")
+	assert.Equal(t, *originalUser.Email, *foundUser.Email, "Found user Email mismatch")
+	assert.Equal(t, originalUser.Age, foundUser.Age, "Found user Age mismatch")
+	assert.False(t, foundUser.CreatedAt.IsZero(), "Found user CreatedAt should not be zero")
+	// UpdatedAt was inserted as nil, should still be nil
+	assert.Nil(t, foundUser.UpdatedAt, "Found user UpdatedAt should be nil")
+}
+
+// *** NEW Test for FindByID Not Found ***
+func TestDBFindByID_NotFound(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t) // Setup ensures table exists but is empty
+
+	nonExistentID := uint(999999999) // An ID that is extremely unlikely to exist
+	var foundUser CreateTestUser     // Variable to attempt scanning into
+
+	// Act: Find a non-existent record
+	findResult := db.FindByID(ctx, &foundUser, nonExistentID)
+
+	// Assert
+	require.Error(t, findResult.Error, "FindByID should return an error for non-existent ID")
+	// Check if the error is specifically sql.ErrNoRows
+	assert.True(t, errors.Is(findResult.Error, sql.ErrNoRows), "Error should be sql.ErrNoRows")
+
+	// Ensure the destination struct was not modified (should still have zero values)
+	assert.Zero(t, foundUser.ID)
+	assert.Empty(t, foundUser.Name)
+	assert.Nil(t, foundUser.Email)
+}
+
+// --- NEW Tests for DB.Delete ---
+
+func TestDBDelete_Success(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a record to delete
+	userToCreate := CreateTestUser{Name: "ToDelete", Age: 99}
+	createResult := db.Create(ctx, &userToCreate)
+	require.NoError(t, createResult.Error, "Setup: Failed to create user for Delete test")
+	require.True(t, userToCreate.ID > 0, "Setup: Created user should have an ID")
+	createdID := userToCreate.ID // Store the ID
+
+	// 2. Act: Delete the record using the struct instance (which now has the ID)
+	deleteResult := db.Delete(ctx, &userToCreate)
+
+	// 3. Assert Delete Result
+	require.NoError(t, deleteResult.Error, "Delete returned an error")
+	assert.EqualValues(t, 1, deleteResult.RowsAffected, "RowsAffected should be 1 for successful delete")
+
+	// 4. Assert: Verify the record is actually gone using FindByID
+	var foundUser CreateTestUser
+	verifyResult := db.FindByID(ctx, &foundUser, createdID) // Try to find the deleted ID
+
+	require.Error(t, verifyResult.Error, "FindByID after Delete should return an error")
+	assert.True(t, errors.Is(verifyResult.Error, sql.ErrNoRows), "FindByID error after Delete should be sql.ErrNoRows")
+}
+
+func TestDBDelete_NotFound(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a user struct with an ID that doesn't exist
+	nonExistentUser := CreateTestUser{
+		ID:   9999999, // Non-existent ID
+		Name: "Ghost",
+	}
+
+	// 2. Act: Attempt to delete the non-existent record
+	deleteResult := db.Delete(ctx, &nonExistentUser)
+
+	// 3. Assert
+	require.NoError(t, deleteResult.Error, "Delete should not return a SQL error when record not found")
+	assert.EqualValues(t, 0, deleteResult.RowsAffected, "RowsAffected should be 0 when deleting non-existent record")
+}
+
+func TestDBDelete_ZeroPK(t *testing.T) {
+	ctx, db, _ := setupIntegrationTest(t)
+
+	// 1. Arrange: Create a user struct with the default zero ID
+	zeroPKUser := CreateTestUser{
+		Name: "ZeroIDUser",
+		// ID is implicitly 0
+	}
+
+	// 2. Act: Attempt to delete the record with a zero PK
+	deleteResult := db.Delete(ctx, &zeroPKUser)
+
+	// 3. Assert
+	require.Error(t, deleteResult.Error, "Delete should return an error when PK is zero")
+	assert.Contains(t, deleteResult.Error.Error(), "primary key field", "Error message should mention primary key")
+	assert.Contains(t, deleteResult.Error.Error(), "zero value", "Error message should mention zero value")
+
+	// Optional: Verify no records were accidentally deleted (e.g., query count)
+	// ds := db.GetDataSource()
+	// var count int
+	// row := ds.QueryRow(ctx, "SELECT COUNT(*) FROM `create_test_users`")
+	// err := row.Scan(&count)
+	// require.NoError(t, err)
+	// assert.Zero(t, count, "No records should be present after failed delete attempt")
 }
 
 // TODO: Add more test cases for Create:

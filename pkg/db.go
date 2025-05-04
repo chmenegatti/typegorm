@@ -449,3 +449,89 @@ func (db *DB) FindByID(ctx context.Context, dest any, id any) *Result {
 	fmt.Printf("Successfully found and scanned record for ID %v into %s\n", id, destType.Name())
 	return result
 }
+
+// Delete deletes a record based on the primary key found in the provided value.
+// 'value' must be a pointer to a struct instance containing the primary key value(s).
+// Returns a Result object; check Result.Error for issues and Result.RowsAffected
+// (RowsAffected == 0 indicates the record was not found or not deleted).
+func (db *DB) Delete(ctx context.Context, value any) *Result {
+	result := &Result{}
+
+	// 1. Validate input & Get Reflect Value/Type
+	reflectValue := reflect.ValueOf(value)
+	if reflectValue.Kind() != reflect.Pointer || reflectValue.IsNil() {
+		result.Error = fmt.Errorf("input value must be a non-nil pointer to a struct, got %T", value)
+		return result
+	}
+	structValue := reflectValue.Elem()
+	if structValue.Kind() != reflect.Struct {
+		result.Error = fmt.Errorf("input value must be a pointer to a struct, got pointer to %s", structValue.Kind())
+		return result
+	}
+	structType := structValue.Type()
+
+	// 2. Parse Schema
+	model, err := db.GetModel(value)
+	if err != nil {
+		result.Error = fmt.Errorf("failed to parse schema for type %s: %w", structType.Name(), err)
+		return result
+	}
+
+	// 3. Extract Primary Key values
+	if len(model.PrimaryKeys) == 0 {
+		result.Error = fmt.Errorf("cannot delete: model %s has no primary key defined", model.Name)
+		return result
+	}
+
+	pkArgs := make([]any, 0, len(model.PrimaryKeys))
+	pkWhereClauses := make([]string, 0, len(model.PrimaryKeys))
+	dialect := db.source.Dialect()
+
+	for i, pkField := range model.PrimaryKeys {
+		pkValueField := structValue.FieldByName(pkField.GoName)
+		if !pkValueField.IsValid() {
+			result.Error = fmt.Errorf("internal error: primary key field %s not found in struct %s", pkField.GoName, model.Name)
+			return result
+		}
+		// Check if the PK value is its zero value - we usually don't delete records with zero PKs.
+		if pkValueField.IsZero() {
+			result.Error = fmt.Errorf("cannot delete: primary key field %s has zero value", pkField.GoName)
+			return result
+		}
+		pkArgs = append(pkArgs, pkValueField.Interface())
+		pkWhereClauses = append(pkWhereClauses, fmt.Sprintf("%s = %s", dialect.Quote(pkField.DBName), dialect.BindVar(i+1)))
+	}
+
+	// 4. Build DELETE SQL
+	tableNameQuoted := dialect.Quote(model.TableName)
+	sqlQuery := fmt.Sprintf("DELETE FROM %s WHERE %s",
+		tableNameQuoted,
+		strings.Join(pkWhereClauses, " AND "),
+	)
+
+	// 5. Execute SQL
+	fmt.Printf("Executing SQL: %s | Args: %v\n", sqlQuery, pkArgs) // Debug log
+	sqlResult, err := db.source.Exec(ctx, sqlQuery, pkArgs...)
+	if err != nil {
+		result.Error = fmt.Errorf("failed to execute delete for %s: %w", model.Name, err)
+		return result
+	}
+
+	// 6. Populate Result
+	affected, err := sqlResult.RowsAffected()
+	if err != nil {
+		fmt.Printf("Warning: could not get RowsAffected after delete: %v\n", err)
+		// Don't set result.Error here, the delete itself succeeded if err above was nil
+	}
+	result.RowsAffected = affected
+
+	if affected == 0 {
+		fmt.Printf("Warning: Delete executed but no rows affected (record with PK probably didn't exist).\n")
+		// Optional: Set a specific "not found" error if desired, but RowsAffected=0 is often sufficient indication.
+		// result.Error = ErrRecordNotFound // A custom error type
+	} else {
+		fmt.Printf("Successfully deleted %d record(s) for %s.\n", affected, model.Name)
+	}
+
+	return result // Error will be nil if execution succeeded
+}
