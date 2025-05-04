@@ -5,38 +5,41 @@ import (
 	"fmt"
 
 	"github.com/chmenegatti/typegorm/pkg/config"
-	"github.com/chmenegatti/typegorm/pkg/dialects"        // Importa o registro
-	"github.com/chmenegatti/typegorm/pkg/dialects/common" // Importa as interfaces
+	"github.com/chmenegatti/typegorm/pkg/dialects" // Importa o registro
+	"github.com/chmenegatti/typegorm/pkg/schema"
+	// Importa as interfaces
 	// Drivers específicos serão importados pelo usuário via blank import _
 )
 
-// Open inicializa e retorna um DataSource com base na configuração fornecida.
-// Ele seleciona dinamicamente o driver apropriado que foi registrado.
-func Open(cfg config.Config) (common.DataSource, error) {
+func Open(cfg config.Config) (*DB, error) {
 	dialectName := cfg.Database.Dialect
 	if dialectName == "" {
-		return nil, fmt.Errorf("dialeto não especificado na configuração")
+		return nil, fmt.Errorf("database dialect not specified in configuration")
 	}
 
-	// 1. Procurar a factory do dialeto no registro
+	// 1. Get DataSource Factory
 	factory := dialects.Get(dialectName)
 	if factory == nil {
-		return nil, fmt.Errorf("dialeto desconhecido ou não registrado: '%s'. Verifique se importou o driver com blank import (_)", dialectName)
+		return nil, fmt.Errorf("unsupported or unregistered dialect: '%s'. Ensure the driver package was blank imported", dialectName)
 	}
 
-	// 2. Criar a instância do DataSource usando a factory
+	// 2. Create and Connect DataSource
 	ds := factory()
 	if ds == nil {
-		// A factory não deveria retornar nil, mas checamos por segurança.
-		return nil, fmt.Errorf("a factory para o dialeto '%s' retornou um DataSource nil", dialectName)
+		return nil, fmt.Errorf("internal error: factory for dialect '%s' returned nil DataSource", dialectName)
 	}
-
-	// 3. Conectar o DataSource usando a configuração específica do banco
 	err := ds.Connect(cfg.Database)
 	if err != nil {
-		return nil, fmt.Errorf("falha ao conectar usando o dialeto '%s': %w", dialectName, err)
+		return nil, fmt.Errorf("failed to connect data source for dialect '%s': %w", dialectName, err)
 	}
 
-	// 4. Retornar o DataSource conectado e pronto para uso
-	return ds, nil
+	// 3. Create Schema Parser (using default naming strategy for now)
+	// TODO: Allow configuration of naming strategy
+	parser := schema.NewParser(nil)
+
+	// 4. Create and return the DB handle
+	db := NewDB(ds, parser, cfg) // Pass ds, parser, and cfg
+
+	fmt.Printf("TypeGORM DB handle created successfully for dialect '%s'.\n", dialectName)
+	return db, nil
 }
