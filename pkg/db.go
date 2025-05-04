@@ -4,6 +4,7 @@ package typegorm
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings" // For SQL builder
@@ -346,4 +347,105 @@ func (db *DB) Create(ctx context.Context, value any) *Result {
 	}
 
 	return result // Contains error=nil if successful
+}
+
+// FindByID finds the first record matching the given primary key value and scans it into dest.
+// 'dest' must be a pointer to a struct.
+// 'id' is the primary key value to search for. Assumes a single primary key column for now.
+// Returns a Result object. Result.Error will be sql.ErrNoRows if the record is not found.
+func (db *DB) FindByID(ctx context.Context, dest any, id any) *Result {
+	result := &Result{}
+
+	// 1. Validate dest input
+	destValue := reflect.ValueOf(dest)
+	if destValue.Kind() != reflect.Pointer || destValue.IsNil() {
+		result.Error = fmt.Errorf("destination must be a non-nil pointer to a struct, got %T", dest)
+		return result
+	}
+	destElem := destValue.Elem() // The struct instance itself
+	if destElem.Kind() != reflect.Struct {
+		result.Error = fmt.Errorf("destination must be a pointer to a struct, got pointer to %s", destElem.Kind())
+		return result
+	}
+	destType := destElem.Type()
+
+	// 2. Parse Schema for dest type
+	model, err := db.GetModel(dest) // Use cache-enabled parser
+	if err != nil {
+		result.Error = fmt.Errorf("failed to parse schema for type %s: %w", destType.Name(), err)
+		return result
+	}
+
+	// 3. Identify Primary Key Column (assuming single PK for now)
+	if len(model.PrimaryKeys) != 1 {
+		result.Error = fmt.Errorf("FindByID currently supports models with exactly one primary key, found %d for %s", len(model.PrimaryKeys), model.Name)
+		return result
+	}
+	pkField := model.PrimaryKeys[0]
+
+	// 4. Build SELECT SQL
+	dialect := db.source.Dialect()
+	selectCols := []string{}
+	scanFields := []*schema.Field{} // Keep track of fields to scan into
+
+	for _, field := range model.Fields {
+		if !field.IsIgnored {
+			selectCols = append(selectCols, dialect.Quote(field.DBName))
+			scanFields = append(scanFields, field)
+		}
+	}
+
+	if len(selectCols) == 0 {
+		result.Error = fmt.Errorf("no selectable columns found for model %s", model.Name)
+		return result
+	}
+
+	tableNameQuoted := dialect.Quote(model.TableName)
+	pkColNameQuoted := dialect.Quote(pkField.DBName)
+	// Use LIMIT 1 for safety, although QueryRow should handle it
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = %s LIMIT 1",
+		strings.Join(selectCols, ", "),
+		tableNameQuoted,
+		pkColNameQuoted,
+		dialect.BindVar(1), // Placeholder for the ID arg
+	)
+
+	// 5. Execute Query using QueryRow
+	fmt.Printf("Executing SQL: %s | Args: [%v]\n", query, id) // Debug log
+	rowScanner := db.source.QueryRow(ctx, query, id)
+
+	// 6. Prepare Scan Destinations
+	scanDest := make([]any, len(scanFields))
+	for i, field := range scanFields {
+		// Get a pointer to the corresponding field in the dest struct
+		fieldValue := destElem.FieldByName(field.GoName)
+		if !fieldValue.IsValid() {
+			result.Error = fmt.Errorf("internal error: struct field %s not found in destination", field.GoName)
+			return result
+		}
+		if !fieldValue.CanAddr() {
+			result.Error = fmt.Errorf("internal error: struct field %s is not addressable", field.GoName)
+			return result
+		}
+		scanDest[i] = fieldValue.Addr().Interface() // Get pointer to field
+	}
+
+	// 7. Scan the row into the destinations
+	err = rowScanner.Scan(scanDest...)
+	if err != nil {
+		// Check specifically for ErrNoRows
+		if errors.Is(err, sql.ErrNoRows) {
+			fmt.Printf("Record not found for ID %v in table %s\n", id, tableNameQuoted)
+			result.Error = sql.ErrNoRows // Set standard error for not found
+		} else {
+			// Other database/scan error
+			result.Error = fmt.Errorf("failed to scan result for model %s: %w", model.Name, err)
+		}
+		return result
+	}
+
+	// If scan succeeded, error is nil
+	result.RowsAffected = 1 // QueryRow affects 1 row if found
+	fmt.Printf("Successfully found and scanned record for ID %v into %s\n", id, destType.Name())
+	return result
 }
