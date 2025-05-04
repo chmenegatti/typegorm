@@ -299,8 +299,8 @@ func (db *DB) Create(ctx context.Context, value any) *Result {
 	if canRefetch && len(pkWhereClauses) > 0 {
 		// Build SELECT statement for all non-ignored fields
 		selectCols := []string{}
-		scanDest := []any{}             // Slice to hold pointers for Scan
-		scanFields := []*schema.Field{} // Keep track of fields being scanned
+		scanDest := []any{} // Slice to hold pointers for Scan
+		// scanFields := []*schema.Field{} // Keep track of fields being scanned
 
 		for _, field := range model.Fields {
 			if !field.IsIgnored {
@@ -309,7 +309,7 @@ func (db *DB) Create(ctx context.Context, value any) *Result {
 				fieldRef := structValue.FieldByName(field.GoName)
 				if fieldRef.IsValid() && fieldRef.CanAddr() {
 					scanDest = append(scanDest, fieldRef.Addr().Interface())
-					scanFields = append(scanFields, field)
+					// scanFields = append(scanFields, field)
 				} else {
 					// Should not happen if struct is valid
 					fmt.Printf("Warning: Cannot create scan destination for field %s\n", field.GoName)
