@@ -129,35 +129,31 @@ func findMigrationFiles(dir string) ([]migrationFile, error) {
 
 // --- Helper Function: Get Applied Migrations ---
 
-// getAppliedMigrations fetches the list of applied migration IDs from the database.
-func getAppliedMigrations(ctx context.Context, ds common.DataSource, tableName string) (map[string]time.Time, error) {
+func getAppliedMigrationsOrdered(ctx context.Context, ds common.DataSource, tableName string, order string) ([]common.MigrationRecord, error) {
 	dialect := ds.Dialect()
 	query := dialect.GetAppliedMigrationsSQL(tableName)
-
-	fmt.Printf("Querying database for applied migrations from '%s'...\n", tableName)
+	// Adjust query slightly if specific ordering is needed and not default
+	if strings.ToUpper(order) == "DESC" {
+		query = strings.Replace(query, "ASC", "DESC", 1) // Simple replacement
+	}
+	// fmt.Printf("Querying database for applied migrations from '%s' (Order: %s)...\n", tableName, order) // Reduce noise
 	rows, err := ds.Query(ctx, query)
 	if err != nil {
-		// Handle error potentially caused by table not existing *if* ensureMigrationsTable wasn't called first
-		// For now, assume ensureMigrationsTable was called.
 		return nil, fmt.Errorf("failed to query applied migrations: %w", err)
 	}
-	defer rows.Close() // Ensure rows are closed
-
-	applied := make(map[string]time.Time)
+	defer rows.Close()
+	var applied []common.MigrationRecord
 	for rows.Next() {
-		var record common.MigrationRecord // Use the struct defined in common
-		// Ensure Scan receives pointers and handles potential NULLs if applicable
+		var record common.MigrationRecord
 		if err := rows.Scan(&record.ID, &record.AppliedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan applied migration record: %w", err)
 		}
-		applied[record.ID] = record.AppliedAt
-		// fmt.Printf("  DB Record: ID=%s, AppliedAt=%s\n", record.ID, record.AppliedAt.Format(time.RFC3339))
+		applied = append(applied, record)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating applied migration rows: %w", err)
 	}
-
-	fmt.Printf("Found %d applied migrations in the database.\n", len(applied))
+	// fmt.Printf("Found %d applied migrations in the database.\n", len(applied)) // Reduce noise
 	return applied, nil
 }
 
@@ -279,9 +275,13 @@ func RunStatus(cfg config.Config) error {
 	}
 
 	// 4. Get applied migrations from DB
-	dbMigrations, err := getAppliedMigrations(ctx, ds, migrationTable)
+	appliedMigrationsList, err := getAppliedMigrationsOrdered(ctx, ds, migrationTable, "ASC")
 	if err != nil {
-		return err // Error already includes context
+		return err
+	}
+	dbMigrationsMap := make(map[string]time.Time, len(appliedMigrationsList))
+	for _, rec := range appliedMigrationsList {
+		dbMigrationsMap[rec.ID] = rec.AppliedAt
 	}
 
 	// 5. Compare and Report Status
@@ -290,9 +290,9 @@ func RunStatus(cfg config.Config) error {
 	foundPending := false
 	if len(diskMigrations) == 0 {
 		fmt.Println("No migration files found.")
-		if len(dbMigrations) > 0 {
+		if len(dbMigrationsMap) > 0 {
 			fmt.Printf("WARNING: %d migrations found in database table '%s' but no files found in directory '%s'.\n",
-				len(dbMigrations), migrationTable, cfg.Migration.Directory)
+				len(dbMigrationsMap), migrationTable, cfg.Migration.Directory)
 		}
 		return nil
 	}
@@ -301,7 +301,7 @@ func RunStatus(cfg config.Config) error {
 	fmt.Printf("%-17s %-40s %s\n", "------", "--------------", "--------")
 
 	for _, mf := range diskMigrations {
-		if appliedAt, ok := dbMigrations[mf.ID]; ok {
+		if appliedAt, ok := dbMigrationsMap[mf.ID]; ok {
 			// Applied
 			fmt.Printf("[✓] Applied       %-40s %s (at %s)\n", mf.ID, mf.Name, appliedAt.Local().Format(time.RFC1123))
 		} else {
@@ -310,21 +310,21 @@ func RunStatus(cfg config.Config) error {
 			foundPending = true
 		}
 		// Remove from dbMigrations map to track orphaned DB entries later (optional)
-		delete(dbMigrations, mf.ID)
+		delete(dbMigrationsMap, mf.ID)
 	}
 
 	// Check for migrations recorded in DB but not found on disk (optional, but good practice)
-	if len(dbMigrations) > 0 {
+	if len(dbMigrationsMap) > 0 {
 		fmt.Println("\nWARNING: The following migrations are recorded in the database but their files were not found:")
-		for id, appliedAt := range dbMigrations {
+		for id, appliedAt := range dbMigrationsMap {
 			fmt.Printf("  - %s (Applied at: %s)\n", id, appliedAt.Local().Format(time.RFC1123))
 		}
 	}
 
 	fmt.Println("------------------------")
-	if !foundPending && len(dbMigrations) == 0 { // Only print "Up to date" if no pending AND no orphans
+	if !foundPending && len(dbMigrationsMap) == 0 { // Only print "Up to date" if no pending AND no orphans
 		fmt.Println("Database schema is up to date.")
-	} else if !foundPending && len(dbMigrations) > 0 {
+	} else if !foundPending && len(dbMigrationsMap) > 0 {
 		fmt.Println("No pending migrations, but orphaned records found in DB (see warnings).")
 	} else {
 		fmt.Println("Pending migrations found.")
@@ -361,9 +361,14 @@ func RunUp(cfg config.Config) error {
 	}
 
 	// 4. Get Applied Migrations
-	dbMigrations, err := getAppliedMigrations(ctx, ds, migrationTable)
+	appliedMigrationsList, err := getAppliedMigrationsOrdered(ctx, ds, migrationTable, "ASC")
 	if err != nil {
 		return err
+	}
+	dbMigrationsMap := make(map[string]time.Time, len(appliedMigrationsList))
+
+	for _, rec := range appliedMigrationsList {
+		dbMigrationsMap[rec.ID] = rec.AppliedAt
 	}
 
 	// 5. Determine & Process Pending Migrations
@@ -373,7 +378,7 @@ func RunUp(cfg config.Config) error {
 
 	fmt.Println("Applying pending migrations...")
 	for _, mf := range diskMigrations {
-		if _, applied := dbMigrations[mf.ID]; !applied {
+		if _, applied := dbMigrationsMap[mf.ID]; !applied {
 			pendingCount++
 			fmt.Printf("--> Applying migration %s (%s)...\n", mf.ID, mf.Name)
 
@@ -444,29 +449,126 @@ func RunUp(cfg config.Config) error {
 }
 
 // RunDown reverts the last applied migration(s).
-func RunDown(cfg config.Config) error {
+// *** RunDown Implementation ***
+func RunDown(cfg config.Config, steps int) error {
 	fmt.Println("Running Migrate Down...")
-	fmt.Printf("  Config: %+v\n", cfg.Database) // Print config details (remove sensitive info later)
-	fmt.Printf("  Migrations Dir: %s\n", cfg.Migration.Directory)
-	fmt.Printf("  History Table: %s\n", cfg.Migration.TableName)
-	fmt.Println("<<< NOT YET IMPLEMENTED >>>")
+	if steps <= 0 {
+		fmt.Println("No steps specified for rollback. Use --steps N (where N > 0).")
+		return nil // Not an error, just nothing to do.
+	}
+	fmt.Printf("  Steps to revert: %d\n", steps)
+	ctx := context.Background()
 
-	// TODO:
 	// 1. Get DataSource
-	// 2. Ensure Migrations Table (optional for down, but good check)
-	// 3. Get Applied Migrations (ordered, likely DESC for 'down')
-	// 4. If no applied migrations, report and exit.
-	// 5. Determine the last migration(s) to revert (usually just the last one).
-	// 6. Find the corresponding migration file on disk.
-	// 7. If file not found, report error and stop.
-	// 8. Start Transaction
-	// 9. Read file content
-	// 10. Parse/Extract 'Down' SQL statements
-	// 11. Execute 'Down' SQL statements within transaction
-	// 12. Delete migration record from history table within transaction (using dialect.DeleteMigrationSQL)
-	// 13. Commit Transaction
-	// 14. Report success/failure for the migration
-	// 15. If failure, rollback and stop.
+	ds, err := getDataSource(cfg.Database)
+	if err != nil {
+		return fmt.Errorf("failed to initialize data source for migrate down: %w", err)
+	}
+	defer ds.Close()
 
-	return fmt.Errorf("migrate down not implemented")
+	// 2. Ensure Migrations Table (optional, but good for consistency)
+	migrationTable := cfg.Migration.TableName
+	if migrationTable == "" {
+		return fmt.Errorf("migration table name is not configured")
+	}
+	// Don't strictly need to ensure table for down, but checking doesn't hurt
+	if err := ensureMigrationsTable(ctx, ds, migrationTable); err != nil {
+		// If ensuring fails, likely can't query applied anyway
+		return fmt.Errorf("failed checking migration history table: %w", err)
+	}
+
+	// 3. Get Applied Migrations (Ordered DESC)
+	// We need them ordered descending to get the latest ones first
+	appliedMigrations, err := getAppliedMigrationsOrdered(ctx, ds, migrationTable, "DESC")
+	if err != nil {
+		return err // Error already includes context
+	}
+
+	if len(appliedMigrations) == 0 {
+		fmt.Println("No migrations have been applied yet. Nothing to revert.")
+		return nil
+	}
+
+	// 4. Determine migrations to revert
+	if steps > len(appliedMigrations) {
+		fmt.Printf("Requested %d steps rollback, but only %d migrations are applied. Reverting all applied migrations.\n", steps, len(appliedMigrations))
+		steps = len(appliedMigrations)
+	}
+	migrationsToRevert := appliedMigrations[:steps]
+
+	// 5. Find corresponding migration files on disk (build a map for quick lookup)
+	diskFiles, err := findMigrationFiles(cfg.Migration.Directory)
+	if err != nil {
+		// If directory doesn't exist, we likely can't revert
+		return fmt.Errorf("cannot find migration files needed for rollback: %w", err)
+	}
+	diskFilesMap := make(map[string]migrationFile, len(diskFiles))
+	for _, mf := range diskFiles {
+		diskFilesMap[mf.ID] = mf
+	}
+
+	// 6. Process migrations to revert (in reverse order of application)
+	dialect := ds.Dialect()
+	revertedCount := 0
+	fmt.Printf("Reverting the last %d applied migration(s)...\n", len(migrationsToRevert))
+
+	for _, migrationRecord := range migrationsToRevert {
+		fmt.Printf("--> Reverting migration %s...\n", migrationRecord.ID)
+
+		// Find the file
+		mf, found := diskFilesMap[migrationRecord.ID]
+		if !found {
+			// This is problematic, can't run 'Down' SQL without the file.
+			return fmt.Errorf("cannot revert migration %s: corresponding file not found in %s",
+				migrationRecord.ID, cfg.Migration.Directory)
+		}
+
+		// Parse the file for 'Down' SQL
+		file, err := os.Open(mf.Path)
+		if err != nil {
+			return fmt.Errorf("failed to open migration file '%s' for revert: %w", mf.Path, err)
+		}
+		_, downSQL, err := parseSQLMigration(file)
+		file.Close()
+		if err != nil {
+			return fmt.Errorf("failed to parse migration file '%s' for revert: %w", mf.Path, err)
+		}
+
+		trimmedDownSQL := strings.TrimSpace(downSQL)
+
+		// Execute in Transaction
+		tx, err := ds.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction for reverting migration %s: %w", migrationRecord.ID, err)
+		}
+
+		// Execute 'Down' SQL if present
+		if trimmedDownSQL != "" {
+			if _, err := tx.Exec(ctx, trimmedDownSQL); err != nil {
+				tx.Rollback() // Attempt rollback
+				return fmt.Errorf("failed to execute 'Down' SQL for migration %s: %w", migrationRecord.ID, err)
+			}
+			fmt.Printf("    Executed 'Down' SQL successfully for %s.\n", migrationRecord.ID)
+		} else {
+			fmt.Printf("    No 'Down' SQL found to execute for migration %s.\n", migrationRecord.ID)
+		}
+
+		// Delete record from migration table
+		deleteSQL := dialect.DeleteMigrationSQL(migrationTable)
+		if _, err := tx.Exec(ctx, deleteSQL, migrationRecord.ID); err != nil {
+			tx.Rollback() // Attempt rollback
+			return fmt.Errorf("failed to delete migration %s from history table: %w", migrationRecord.ID, err)
+		}
+
+		// Commit transaction
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction for reverting migration %s: %w", migrationRecord.ID, err)
+		}
+
+		fmt.Printf("--> Successfully reverted and removed migration %s.\n", migrationRecord.ID)
+		revertedCount++
+	}
+
+	fmt.Printf("Finished reverting migrations. Reverted %d migration(s).\n", revertedCount)
+	return nil
 }
