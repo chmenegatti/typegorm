@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings" // For SQL builder
@@ -902,13 +903,18 @@ func (db *DB) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 		queryBuilder.WriteString(" ORDER BY ")
 		queryBuilder.WriteString(options.orderBy)
 	}
-	if options.limit > 0 { // Only add LIMIT if it's positive
-		queryBuilder.WriteString(" LIMIT ")
-		queryBuilder.WriteString(strconv.Itoa(options.limit))
+	effectiveLimit := options.limit
+	if options.offset > 0 && options.limit <= 0 {
+		// Set a large default limit if offset is used without limit
+		// Use math.MaxInt64 which is suitable for most DB limits
+		effectiveLimit = math.MaxInt64
+		fmt.Printf("Applying default LIMIT %d because OFFSET %d was used without explicit LIMIT.\n", effectiveLimit, options.offset)
 	}
-	if options.offset > 0 { // Only add OFFSET if it's positive
-		// Note: OFFSET without LIMIT might behave differently across DBs or be invalid.
-		// Usually used in conjunction with LIMIT.
+	if effectiveLimit > 0 { // Append LIMIT if it's positive (either user-set or default)
+		queryBuilder.WriteString(" LIMIT ")
+		queryBuilder.WriteString(strconv.FormatInt(int64(effectiveLimit), 10)) // Use FormatInt for safety with large numbers
+	}
+	if options.offset > 0 { // Append OFFSET if it's positive
 		queryBuilder.WriteString(" OFFSET ")
 		queryBuilder.WriteString(strconv.Itoa(options.offset))
 	}

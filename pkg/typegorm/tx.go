@@ -5,6 +5,7 @@ import (
 	"database/sql" // Need sql for TxOptions
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -526,11 +527,18 @@ func (tx *Tx) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 		queryBuilder.WriteString(" ORDER BY ")
 		queryBuilder.WriteString(options.orderBy)
 	}
-	if options.limit > 0 {
-		queryBuilder.WriteString(" LIMIT ")
-		queryBuilder.WriteString(strconv.Itoa(options.limit))
+	effectiveLimit := options.limit
+	if options.offset > 0 && options.limit <= 0 {
+		// Set a large default limit if offset is used without limit
+		// Use math.MaxInt64 which is suitable for most DB limits
+		effectiveLimit = math.MaxInt64
+		fmt.Printf("TX Applying default LIMIT %d because OFFSET %d was used without explicit LIMIT.\n", effectiveLimit, options.offset)
 	}
-	if options.offset > 0 {
+	if effectiveLimit > 0 { // Append LIMIT if it's positive (either user-set or default)
+		queryBuilder.WriteString(" LIMIT ")
+		queryBuilder.WriteString(strconv.FormatInt(int64(effectiveLimit), 10)) // Use FormatInt for safety
+	}
+	if options.offset > 0 { // Append OFFSET if it's positive
 		queryBuilder.WriteString(" OFFSET ")
 		queryBuilder.WriteString(strconv.Itoa(options.offset))
 	}
