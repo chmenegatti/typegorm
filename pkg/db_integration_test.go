@@ -86,23 +86,21 @@ func setupIntegrationTest(t *testing.T) (context.Context, *DB, *schema.Model) {
 	fmt.Printf("Ensuring table %s exists for test %s...\n", tableNameQuoted, t.Name())
 	err = db.AutoMigrate(ctx, &CreateTestUser{})
 	require.NoError(t, err, "AutoMigrate failed")
-	err = db.AutoMigrate(ctx, &CreateTestUser{})
-	require.NoError(t, err, "AutoMigrate failed")
 
 	// Clean up table before test runs (optional, ensures clean slate)
-	// Alternatively, drop at the end in Cleanup. Dropping before is safer.
-	fmt.Printf("Cleaning up table '%s' before test...\n", tableNameQuoted)
-	cleanupSQL := fmt.Sprintf("DELETE FROM %s", db.source.Dialect().Quote(tableNameQuoted))
-	// DROP TABLE IF EXISTS is another option for Cleanup func below
-	_, delErr := db.source.Exec(ctx, cleanupSQL)
-	require.NoError(t, delErr, "Failed to clean up table before test")
-	// Ignore "table not found" errors during cleanup delete if AutoMigrate handled creation
+	// // Alternatively, drop at the end in Cleanup. Dropping before is safer.
+	// fmt.Printf("Cleaning up table '%s' before test...\n", tableNameQuoted)
+	// cleanupSQL := fmt.Sprintf("DELETE FROM %s", tableNameQuoted)
+	// // DROP TABLE IF EXISTS is another option for Cleanup func below
+	// _, delErr := db.source.Exec(ctx, cleanupSQL)
 	// require.NoError(t, delErr, "Failed to clean up table before test")
+	// // Ignore "table not found" errors during cleanup delete if AutoMigrate handled creation
+	// // require.NoError(t, delErr, "Failed to clean up table before test")
 
 	// Optional: Add explicit DROP TABLE in Cleanup for after the test run
 	t.Cleanup(func() {
 		fmt.Printf("Dropping table '%s' after test...\n", tableNameQuoted)
-		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", db.source.Dialect().Quote(tableNameQuoted))
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", tableNameQuoted)
 		_, dropErr := db.source.Exec(context.Background(), dropSQL) // Use fresh context
 		assert.NoError(t, dropErr, "Failed to drop table after test")
 

@@ -149,7 +149,13 @@ func (d mysqlDialect) GetDataType(field *schema.Field) (string, error) {
 	}
 
 	// 3. Add constraints
+	var timeType = reflect.TypeOf(time.Time{})
 	var constraints []string
+	hasDefault := false
+	if field.DefaultValue != nil {
+		constraints = append(constraints, fmt.Sprintf("DEFAULT %s", formatDefaultValue(*field.DefaultValue)))
+		hasDefault = true
+	}
 	if field.IsRequired {
 		constraints = append(constraints, "NOT NULL")
 	}
@@ -162,9 +168,25 @@ func (d mysqlDialect) GetDataType(field *schema.Field) (string, error) {
 	if field.Unique {
 		constraints = append(constraints, "UNIQUE")
 	} // Simple column unique constraint
-	if field.DefaultValue != nil {
-		// Basic default value formatting - THIS IS HARD TO GET RIGHT generically
-		constraints = append(constraints, fmt.Sprintf("DEFAULT %s", formatDefaultValue(*field.DefaultValue)))
+
+	isTimeField := (underlyingType == timeType)
+
+	if isTimeField && !hasDefault {
+		if field.GoName == "CreatedAt" {
+			constraints = append(constraints, "DEFAULT CURRENT_TIMESTAMP(6)")
+			// Add NOT NULL if it's not already required and underlying Go type wasn't a pointer
+			if !field.IsRequired && goType.Kind() != reflect.Pointer {
+				constraints = append(constraints, "NOT NULL")
+			}
+			hasDefault = true // Ensure we don't add another default later
+		} else if field.GoName == "UpdatedAt" {
+			// Handle UpdatedAt with ON UPDATE clause
+			// Default to NULL unless required, updates automatically
+			constraints = append(constraints, "DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP(6)")
+			// No need to add NOT NULL unless explicitly required by tag
+			hasDefault = true
+		}
+
 	}
 
 	return strings.TrimSpace(baseType + " " + strings.Join(constraints, " ")), nil

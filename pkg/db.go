@@ -3,9 +3,11 @@ package typegorm
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"reflect"
 	"strings" // For SQL builder
+	"time"
 
 	"github.com/chmenegatti/typegorm/pkg/config" // Needed if Open stays here
 	"github.com/chmenegatti/typegorm/pkg/dialects/common"
@@ -145,67 +147,81 @@ func (db *DB) AutoMigrate(ctx context.Context, values ...any) error {
 
 // *** IMPLEMENT Create Method ***
 func (db *DB) Create(ctx context.Context, value any) *Result {
-	result := &Result{} // Initialize result object
+	result := &Result{}
 
-	// 1. Validate input
+	// 1. Validate input & Get Reflect Value/Type
 	reflectValue := reflect.ValueOf(value)
 	if reflectValue.Kind() != reflect.Pointer || reflectValue.IsNil() {
 		result.Error = fmt.Errorf("input value must be a non-nil pointer to a struct, got %T", value)
 		return result
 	}
-	// Get the struct value itself (e.g., User from *User)
-	structValue := reflectValue.Elem()
+	structValue := reflectValue.Elem() // The struct instance itself
 	if structValue.Kind() != reflect.Struct {
 		result.Error = fmt.Errorf("input value must be a pointer to a struct, got pointer to %s", structValue.Kind())
 		return result
 	}
+	structType := structValue.Type()
 
 	// 2. Parse Schema
-	model, err := db.parser.Parse(value) // Pass original pointer or elem? Parse handles both.
+	model, err := db.GetModel(value) // Use GetModel which uses cache
 	if err != nil {
-		result.Error = fmt.Errorf("failed to parse schema for type %T: %w", value, err)
+		result.Error = fmt.Errorf("failed to parse schema for type %s: %w", structType.Name(), err)
 		return result
 	}
 
-	// 3. Build INSERT statement
+	// 3. Build INSERT statement parts
 	var columns []string
 	var placeholders []string
-	var args []any // Arguments for the SQL query
-
-	tableName := model.TableName // Already quoted by dialect? No, quote here.
+	var args []any
+	tableName := model.TableName
 	dialect := db.source.Dialect()
 
-	// Iterate through parsed fields
+	// Iterate through parsed fields to build the INSERT
 	for _, field := range model.Fields {
 		if field.IsIgnored {
 			continue
 		} // Skip ignored fields
 
-		// Skip auto-increment primary keys if the value is zero
-		// (assumes zero value means "not set, let DB generate")
-		if field.IsPrimaryKey && field.AutoIncrement {
-			fieldValue := structValue.FieldByName(field.GoName)
-			if fieldValue.IsValid() && fieldValue.IsZero() {
-				continue // Skip this column in INSERT, DB will generate it
-			}
-		}
-
-		// TODO: Handle read-only fields (e.g., CreatedAt updated by DB)
-
-		// Get the value from the input struct
 		fieldValue := structValue.FieldByName(field.GoName)
 		if !fieldValue.IsValid() {
-			result.Error = fmt.Errorf("internal error: invalid field value for %s", field.GoName)
-			return result
-		}
+			continue
+		} // Skip if field somehow invalid
 
+		// --- Skip columns that should use DB defaults ---
+		// a) Skip auto-increment PKs if zero
+		if field.IsPrimaryKey && field.AutoIncrement && fieldValue.IsZero() {
+			fmt.Printf("Skipping auto-increment PK field: %s\n", field.GoName)
+			continue
+		}
+		// b) Skip conventional timestamp fields if zero/nil to allow DB defaults
+		if field.GoName == "CreatedAt" || field.GoName == "UpdatedAt" {
+			isZeroTime := false
+			if fieldValue.Kind() == reflect.Struct && fieldValue.Type() == reflect.TypeOf(time.Time{}) {
+				isZeroTime = fieldValue.Interface().(time.Time).IsZero()
+			} else if fieldValue.Kind() == reflect.Pointer && fieldValue.Type().Elem() == reflect.TypeOf(time.Time{}) {
+				isZeroTime = fieldValue.IsNil() // Consider nil pointer as zero for skipping
+				if !isZeroTime {
+					// Also check if it's a pointer to a zero time
+					if tPtr, ok := fieldValue.Interface().(*time.Time); ok && tPtr != nil && tPtr.IsZero() {
+						isZeroTime = true
+					}
+				}
+			}
+			if isZeroTime {
+				fmt.Printf("Skipping zero/nil timestamp field: %s\n", field.GoName)
+				continue // Skip this field, let DB handle default
+			}
+		}
+		// --- End skipping columns ---
+
+		// Add column, placeholder, and the actual value from the struct
 		columns = append(columns, dialect.Quote(field.DBName))
-		placeholders = append(placeholders, dialect.BindVar(len(args)+1)) // Get placeholder (?, $1, etc.)
-		args = append(args, fieldValue.Interface())                       // Add the actual value to args slice
+		placeholders = append(placeholders, dialect.BindVar(len(args)+1))
+		args = append(args, fieldValue.Interface())
 	}
 
 	if len(columns) == 0 {
-		result.Error = fmt.Errorf("no columns available for insert in type %T", value)
+		result.Error = fmt.Errorf("no columns available for insert in type %s", structType.Name())
 		return result
 	}
 
@@ -215,59 +231,118 @@ func (db *DB) Create(ctx context.Context, value any) *Result {
 		strings.Join(columns, ", "),
 		strings.Join(placeholders, ", "),
 	)
-	// Maybe add RETURNING clause for dialects that support it (Postgres) to get ID?
 
 	// 4. Execute SQL
-	// fmt.Printf("Executing SQL: %s | Args: %v\n", sqlQuery, args) // Debug log
+	fmt.Printf("Executing SQL: %s | Args: %v\n", sqlQuery, args) // Debug log
 	sqlResult, err := db.source.Exec(ctx, sqlQuery, args...)
 	if err != nil {
-		result.Error = fmt.Errorf("failed to execute insert for %T: %w", value, err)
+		result.Error = fmt.Errorf("failed to execute insert for %s: %w", structType.Name(), err)
 		return result
 	}
 
-	// 5. Populate Result object
-	if affected, err := sqlResult.RowsAffected(); err == nil {
+	// 5. Populate Result object (RowsAffected, LastInsertID)
+	if affected, errAff := sqlResult.RowsAffected(); errAff == nil {
 		result.RowsAffected = affected
 	} else {
-		fmt.Printf("Warning: could not get RowsAffected after insert: %v\n", err)
+		fmt.Printf("Warning: could not get RowsAffected after insert: %v\n", errAff)
 	}
 
-	// 6. Handle AutoIncrement ID
-	// Check if there's a single auto-increment PK
-	var pkField *schema.Field
-	pkCount := 0
-	for _, f := range model.PrimaryKeys {
-		if f.AutoIncrement {
-			pkField = f
-			pkCount++
-		}
-	}
-
-	if pkCount == 1 { // Only try to get LastInsertId if there's one auto-increment PK
-		if lastID, err := sqlResult.LastInsertId(); err == nil {
+	// Handle setting AutoIncrement ID back onto the input struct
+	var pkField *schema.Field = nil
+	if len(model.PrimaryKeys) == 1 && model.PrimaryKeys[0].AutoIncrement {
+		pkField = model.PrimaryKeys[0] // Get the single auto-inc PK field
+		if lastID, errID := sqlResult.LastInsertId(); errID == nil {
 			result.LastInsertID = lastID
-			// Set the ID back on the input struct value
 			pkValueField := structValue.FieldByName(pkField.GoName)
 			if pkValueField.IsValid() && pkValueField.CanSet() {
-				switch pkValueField.Kind() {
-				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				// Convert lastID to the appropriate type and set it
+				targetType := pkValueField.Type()
+				targetValue := reflect.ValueOf(lastID)
+				if targetType.Kind() != reflect.Int64 && targetValue.CanConvert(targetType) {
+					pkValueField.Set(targetValue.Convert(targetType))
+				} else if targetType.Kind() == reflect.Int64 {
 					pkValueField.SetInt(lastID)
-				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					// Be careful about potential overflow if lastID is negative (unlikely for PK)
-					if lastID >= 0 {
-						pkValueField.SetUint(uint64(lastID))
-					} else {
-						fmt.Printf("Warning: LastInsertId (%d) is negative, cannot set on unsigned PK field %s\n", lastID, pkField.GoName)
-					}
-				default:
-					fmt.Printf("Warning: Cannot set auto-increment ID back on PK field %s (type %s)\n", pkField.GoName, pkValueField.Type())
+				} else {
+					fmt.Printf("Warning: Cannot set auto-increment ID back on PK field %s (type mismatch: %s vs %s)\n", pkField.GoName, targetType, targetValue.Type())
 				}
 			} else {
 				fmt.Printf("Warning: Cannot set auto-increment ID back on PK field %s (invalid or not settable)\n", pkField.GoName)
 			}
 		} else {
-			fmt.Printf("Warning: could not get LastInsertId after insert (driver/DB may not support it): %v\n", err)
+			fmt.Printf("Warning: could not get LastInsertId after insert (driver/DB may not support it): %v\n", errID)
 		}
+	}
+
+	// 6. *** Re-fetch record to update fields set by DB (like CreatedAt) ***
+	// We need the primary key value(s) to query
+	pkValueArgs := []any{}
+	pkWhereClauses := []string{}
+	canRefetch := true
+	for i, pk := range model.PrimaryKeys {
+		var pkValue reflect.Value
+		if pk == pkField && result.LastInsertID > 0 { // Use LastInsertID if available for the PK
+			pkValue = reflect.ValueOf(result.LastInsertID) // Use the ID we just got
+		} else { // Otherwise, use the value from the input struct
+			pkValue = structValue.FieldByName(pk.GoName)
+		}
+
+		if !pkValue.IsValid() {
+			fmt.Printf("Warning: Cannot build query to re-fetch created record: invalid primary key field %s\n", pk.GoName)
+			canRefetch = false
+			break
+		}
+		pkWhereClauses = append(pkWhereClauses, fmt.Sprintf("%s = %s", dialect.Quote(pk.DBName), dialect.BindVar(i+1)))
+		pkValueArgs = append(pkValueArgs, pkValue.Interface())
+	}
+
+	if canRefetch && len(pkWhereClauses) > 0 {
+		// Build SELECT statement for all non-ignored fields
+		selectCols := []string{}
+		scanDest := []any{}             // Slice to hold pointers for Scan
+		scanFields := []*schema.Field{} // Keep track of fields being scanned
+
+		for _, field := range model.Fields {
+			if !field.IsIgnored {
+				selectCols = append(selectCols, dialect.Quote(field.DBName))
+				// Create a pointer to the field in the original input struct `value`
+				fieldRef := structValue.FieldByName(field.GoName)
+				if fieldRef.IsValid() && fieldRef.CanAddr() {
+					scanDest = append(scanDest, fieldRef.Addr().Interface())
+					scanFields = append(scanFields, field)
+				} else {
+					// Should not happen if struct is valid
+					fmt.Printf("Warning: Cannot create scan destination for field %s\n", field.GoName)
+					result.Error = fmt.Errorf("internal error preparing re-fetch scan for field %s", field.GoName)
+					return result // Abort if we can't scan properly
+				}
+			}
+		}
+
+		if len(selectCols) > 0 {
+			selectQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
+				strings.Join(selectCols, ", "),
+				dialect.Quote(tableName),
+				strings.Join(pkWhereClauses, " AND "),
+			)
+
+			// Execute SELECT query using QueryRow
+			fmt.Printf("Re-fetching record with query: %s | Args: %v\n", selectQuery, pkValueArgs)
+			rowScanner := db.source.QueryRow(ctx, selectQuery, pkValueArgs...)
+
+			// Scan the result directly back into the fields of the original struct
+			if scanErr := rowScanner.Scan(scanDest...); scanErr != nil {
+				// Don't overwrite the original insert success, just warn
+				fmt.Printf("Warning: Failed to re-fetch record after create to update default values: %v\n", scanErr)
+				// If the error is sql.ErrNoRows, it's particularly strange after an insert
+				if scanErr == sql.ErrNoRows {
+					fmt.Println("Error: Record not found immediately after insert during re-fetch.")
+				}
+			} else {
+				fmt.Println("Successfully re-fetched record after create.")
+			}
+		}
+	} else if canRefetch { // Only warn if we could have refetched but didn't have PKs
+		fmt.Println("Warning: Cannot re-fetch record after create without primary key information.")
 	}
 
 	return result // Contains error=nil if successful
