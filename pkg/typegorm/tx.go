@@ -337,6 +337,16 @@ func (tx *Tx) FindByID(ctx context.Context, dest any, id any) *Result {
 		return result
 	}
 	result.RowsAffected = 1
+
+	// --- Call AfterFind Hook ---
+	if model.HasAfterFind {
+		hookMethod := destValue.MethodByName("AfterFind") // Call on the pointer receiver 'dest'
+		if err := callHook(ctx, tx, hookMethod, destElem); err != nil {
+			fmt.Printf("tx Warning: AfterFind hook failed for ID %v: %v\n", id, err)
+		}
+	}
+	// --- End Hook Call ---
+
 	return result
 }
 
@@ -353,12 +363,24 @@ func (tx *Tx) Delete(ctx context.Context, value any) *Result {
 		result.Error = fmt.Errorf("tx: input value must be a pointer to a struct, got pointer to %s", structValue.Kind())
 		return result
 	}
+
 	structType := structValue.Type()
 	model, err := tx.parser.Parse(value)
 	if err != nil {
 		result.Error = fmt.Errorf("tx: failed to parse schema for type %s: %w", structType.Name(), err)
 		return result
 	}
+
+	// --- Call BeforeDelete Hook ---
+	if model.HasBeforeDelete {
+		hookMethod := reflectValue.MethodByName("BeforeDelete")
+		if err := callHook(ctx, tx, hookMethod, structValue); err != nil {
+			result.Error = fmt.Errorf("BeforeDelete hook failed: %w", err)
+			return result
+		}
+	}
+	// --- End Hook Call ---
+
 	if len(model.PrimaryKeys) == 0 {
 		result.Error = fmt.Errorf("tx: cannot delete: model %s has no primary key defined", model.Name)
 		return result
@@ -396,6 +418,16 @@ func (tx *Tx) Delete(ctx context.Context, value any) *Result {
 	if affected == 0 {
 		fmt.Printf("tx Warning: Delete executed but no rows affected (record with PK probably didn't exist).\n")
 	}
+
+	// --- Call AfterDelete Hook ---
+	if model.HasAfterDelete && affected > 0 { // Only call if delete likely succeeded
+		hookMethod := reflectValue.MethodByName("AfterDelete")
+		if err := callHook(ctx, tx, hookMethod, structValue); err != nil {
+			fmt.Printf("tx Warning: AfterDelete hook failed: %v\n", err)
+		}
+	}
+	// --- End Hook Call ---
+
 	return result
 }
 
@@ -478,6 +510,16 @@ func (tx *Tx) FindFirst(ctx context.Context, dest any, conds ...any) *Result {
 		return result
 	}
 	result.RowsAffected = 1
+
+	// --- Call AfterFind Hook ---
+	if model.HasAfterFind {
+		hookMethod := destValue.MethodByName("AfterFind") // Call on the pointer receiver 'dest'
+		if err := callHook(ctx, tx, hookMethod, destElem); err != nil {
+			fmt.Printf("tx Warning: AfterFind hook failed for FindFirst: %v\n", err)
+		}
+	}
+	// --- End Hook Call ---
+
 	return result
 }
 
@@ -500,6 +542,18 @@ func (tx *Tx) Updates(ctx context.Context, modelWithValue any, data map[string]a
 		result.Error = fmt.Errorf("tx: failed to parse schema for type %s: %w", structType.Name(), err)
 		return result
 	}
+
+	// --- Call BeforeUpdate Hook ---
+	if model.HasBeforeUpdate {
+		// Pass a copy of the map? Or allow modification? Let's allow modification for now.
+		hookMethod := reflectValue.MethodByName("BeforeUpdate")
+		if err := callHookWithData(ctx, tx, hookMethod, structValue, data); err != nil {
+			result.Error = fmt.Errorf("BeforeUpdate hook failed: %w", err)
+			return result
+		}
+	}
+	// --- End Hook Call ---
+
 	if len(model.PrimaryKeys) == 0 {
 		result.Error = fmt.Errorf("tx: cannot update: model %s has no primary key defined", model.Name)
 		return result
@@ -557,6 +611,16 @@ func (tx *Tx) Updates(ctx context.Context, modelWithValue any, data map[string]a
 	if affected == 0 {
 		fmt.Printf("tx Warning: Update executed but no rows affected (record with PK might not exist or values were the same).\n")
 	}
+
+	// --- Call AfterUpdate Hook ---
+	if model.HasAfterUpdate && affected > 0 { // Only call if update likely succeeded
+		hookMethod := reflectValue.MethodByName("AfterUpdate")
+		if err := callHook(ctx, tx, hookMethod, structValue); err != nil {
+			fmt.Printf("tx Warning: AfterUpdate hook failed: %v\n", err)
+		}
+	}
+	// --- End Hook Call ---
+
 	return result
 }
 
@@ -666,6 +730,8 @@ func (tx *Tx) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 	// 6. Iterate and Scan Rows into Slice (remains the same logic)
 	sliceValue.Set(reflect.MakeSlice(sliceValue.Type(), 0, 0))
 	rowCount := 0
+
+	var addedElements []reflect.Value
 	for rows.Next() {
 		rowCount++
 		newElemInstance := reflect.New(schemaType).Elem()
@@ -687,9 +753,12 @@ func (tx *Tx) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 			return result
 		}
 		if elementIsPointer {
-			sliceValue.Set(reflect.Append(sliceValue, newElemInstance.Addr()))
+			elemPtr := newElemInstance.Addr()
+			sliceValue.Set(reflect.Append(sliceValue, elemPtr))
+			addedElements = append(addedElements, elemPtr) // Store pointer
 		} else {
 			sliceValue.Set(reflect.Append(sliceValue, newElemInstance))
+			addedElements = append(addedElements, newElemInstance) // Store value
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -697,5 +766,24 @@ func (tx *Tx) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 		return result
 	}
 	result.RowsAffected = int64(rowCount)
+
+	// --- Call AfterFind Hook for each found element ---
+	if model.HasAfterFind && rowCount > 0 {
+		for _, elemValue := range addedElements {
+			instanceValue := elemValue // This is either the struct value or pointer value
+			hookMethod := instanceValue.MethodByName("AfterFind")
+			if hookMethod.IsValid() { // Check if method exists on the specific value/pointer
+				// Need the underlying struct value for callHook if elem is pointer
+				structValForHook := instanceValue
+				if instanceValue.Kind() == reflect.Pointer {
+					structValForHook = instanceValue.Elem()
+				}
+				if err := callHook(ctx, tx, hookMethod, structValForHook); err != nil {
+					fmt.Printf("tx Warning: AfterFind hook failed for element: %v\n", err)
+				}
+			}
+		}
+	}
+	// --- End Hook Call ---
 	return result
 }
