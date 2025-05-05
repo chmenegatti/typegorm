@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chmenegatti/typegorm/pkg/dialects/common"
+	"github.com/chmenegatti/typegorm/pkg/hooks"
 	"github.com/chmenegatti/typegorm/pkg/schema"
 )
 
@@ -60,6 +61,93 @@ func (tx *Tx) Rollback() error {
 	return nil // Typically return nil unless Rollback itself caused a new error
 }
 
+// Helper function to call hook methods using reflection
+// Handles both value and pointer receivers.
+func callHook(ctx context.Context, dbContext hooks.ContextDB, methodValue reflect.Value, instanceValue reflect.Value) error {
+
+	// Check if method expects pointer receiver and instance is not addressable
+	// This check might be overly complex depending on how Implements was checked.
+	// If Implements checked both value and pointer, we might just need to ensure we call on the right one.
+	// Let's try calling on Addr() first if possible, then on value.
+
+	var callArgs = []reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(dbContext)}
+	var results []reflect.Value
+
+	// Try calling on pointer receiver first if possible
+	if instanceValue.CanAddr() {
+		instancePtr := instanceValue.Addr()
+		methodOnPtr := instancePtr.MethodByName(methodValue.Type().Name()) // Get method by name on pointer
+		if methodOnPtr.IsValid() && methodOnPtr.Type().NumIn() == 2 {      // Check if method exists on pointer and takes correct args
+			fmt.Printf("Calling hook %s on pointer receiver\n", methodValue.Type().Name())
+			results = methodOnPtr.Call(callArgs)
+			if len(results) > 0 && !results[0].IsNil() {
+				if err, ok := results[0].Interface().(error); ok {
+					return err // Return error from hook
+				}
+			}
+			return nil // Hook succeeded or returned nil error
+		}
+	}
+
+	// If pointer call didn't work or wasn't possible, try on value receiver
+	methodOnValue := instanceValue.MethodByName(methodValue.Type().Name())
+	if methodOnValue.IsValid() && methodOnValue.Type().NumIn() == 2 {
+		fmt.Printf("Calling hook %s on value receiver\n", methodValue.Type().Name())
+		results = methodOnValue.Call(callArgs)
+		if len(results) > 0 && !results[0].IsNil() {
+			if err, ok := results[0].Interface().(error); ok {
+				return err // Return error from hook
+			}
+		}
+		return nil // Hook succeeded or returned nil error
+	}
+
+	// This shouldn't happen if HasX flag was true, indicates inconsistency
+	// fmt.Printf("Warning: Hook method %s found by parser but not callable via reflection.\n", methodValue.Type().Name())
+	return nil // Or return an internal error?
+}
+
+// Helper function to call hook methods that modify data (e.g., BeforeUpdate)
+func callHookWithData(ctx context.Context, dbContext hooks.ContextDB, methodValue reflect.Value, instanceValue reflect.Value, data map[string]any) error {
+
+	var callArgs = []reflect.Value{
+		reflect.ValueOf(ctx),
+		reflect.ValueOf(dbContext),
+		reflect.ValueOf(data), // Pass the data map
+	}
+	var results []reflect.Value
+
+	// Try pointer receiver first
+	if instanceValue.CanAddr() {
+		instancePtr := instanceValue.Addr()
+		methodOnPtr := instancePtr.MethodByName(methodValue.Type().Name())
+		if methodOnPtr.IsValid() && methodOnPtr.Type().NumIn() == 3 {
+			fmt.Printf("Calling hook %s on pointer receiver with data\n", methodValue.Type().Name())
+			results = methodOnPtr.Call(callArgs)
+			if len(results) > 0 && !results[0].IsNil() {
+				if err, ok := results[0].Interface().(error); ok {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
+	// Try value receiver
+	methodOnValue := instanceValue.MethodByName(methodValue.Type().Name())
+	if methodOnValue.IsValid() && methodOnValue.Type().NumIn() == 3 {
+		fmt.Printf("Calling hook %s on value receiver with data\n", methodValue.Type().Name())
+		results = methodOnValue.Call(callArgs)
+		if len(results) > 0 && !results[0].IsNil() {
+			if err, ok := results[0].Interface().(error); ok {
+				return err
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
 // Create inserts a new record within the transaction.
 func (tx *Tx) Create(ctx context.Context, value any) *Result {
 	result := &Result{}
@@ -79,6 +167,17 @@ func (tx *Tx) Create(ctx context.Context, value any) *Result {
 		result.Error = fmt.Errorf("tx: failed to parse schema for type %s: %w", structType.Name(), err)
 		return result
 	}
+
+	// --- Call BeforeCreate Hook ---
+	if model.HasBeforeCreate {
+		hookMethod := reflect.ValueOf(value).MethodByName("BeforeCreate") // Get method value
+		if err := callHook(ctx, tx, hookMethod, structValue); err != nil {
+			result.Error = fmt.Errorf("BeforeCreate hook failed: %w", err)
+			return result
+		}
+	}
+	// --- End Hook Call ---
+
 	var columns []string
 	var placeholders []string
 	var args []any
@@ -159,6 +258,16 @@ func (tx *Tx) Create(ctx context.Context, value any) *Result {
 	// For simplicity, we might omit the automatic re-fetch in the Tx version,
 	// or make it optional, as the state isn't final until commit.
 	// Let's omit re-fetch for Tx.Create for now. The user can tx.FindByID if needed.
+
+	// --- Call AfterCreate Hook ---
+	if model.HasAfterCreate {
+		hookMethod := reflect.ValueOf(value).MethodByName("AfterCreate")
+		if err := callHook(ctx, tx, hookMethod, structValue); err != nil {
+			// Log error but don't fail the main operation
+			fmt.Printf("tx Warning: AfterCreate hook failed: %v\n", err)
+		}
+	}
+	// --- End Hook Call ---
 	return result
 }
 
