@@ -172,6 +172,16 @@ func (db *DB) Create(ctx context.Context, value any) *Result {
 		return result
 	}
 
+	// --- Call BeforeCreate Hook ---
+	if model.HasBeforeCreate {
+		hookMethod := reflectValue.MethodByName("BeforeCreate")            // Get method on pointer value
+		if err := callHook(ctx, db, hookMethod, structValue); err != nil { // Pass DB as ContextDB
+			result.Error = fmt.Errorf("BeforeCreate hook failed: %w", err)
+			return result
+		}
+	}
+	// --- End Hook Call ---
+
 	// 3. Build INSERT statement parts
 	var columns []string
 	var placeholders []string
@@ -348,6 +358,15 @@ func (db *DB) Create(ctx context.Context, value any) *Result {
 		fmt.Println("Warning: Cannot re-fetch record after create without primary key information.")
 	}
 
+	// --- Call AfterCreate Hook ---
+	if model.HasAfterCreate {
+		hookMethod := reflectValue.MethodByName("AfterCreate")
+		if err := callHook(ctx, db, hookMethod, structValue); err != nil {
+			fmt.Printf("Warning: AfterCreate hook failed: %v\n", err)
+		}
+	}
+	// --- End Hook Call ---
+
 	return result // Contains error=nil if successful
 }
 
@@ -449,6 +468,15 @@ func (db *DB) FindByID(ctx context.Context, dest any, id any) *Result {
 	// If scan succeeded, error is nil
 	result.RowsAffected = 1 // QueryRow affects 1 row if found
 	fmt.Printf("Successfully found and scanned record for ID %v into %s\n", id, destType.Name())
+
+	// --- Call AfterFind Hook ---
+	if model.HasAfterFind {
+		hookMethod := destValue.MethodByName("AfterFind")
+		if err := callHook(ctx, db, hookMethod, destElem); err != nil {
+			fmt.Printf("Warning: AfterFind hook failed for ID %v: %v\n", id, err)
+		}
+	}
+	// --- End Hook Call ---
 	return result
 }
 
@@ -478,6 +506,16 @@ func (db *DB) Delete(ctx context.Context, value any) *Result {
 		result.Error = fmt.Errorf("failed to parse schema for type %s: %w", structType.Name(), err)
 		return result
 	}
+
+	// --- Call BeforeDelete Hook ---
+	if model.HasBeforeDelete {
+		hookMethod := reflectValue.MethodByName("BeforeDelete")
+		if err := callHook(ctx, db, hookMethod, structValue); err != nil {
+			result.Error = fmt.Errorf("BeforeDelete hook failed: %w", err)
+			return result
+		}
+	}
+	// --- End Hook Call ---
 
 	// 3. Extract Primary Key values
 	if len(model.PrimaryKeys) == 0 {
@@ -534,6 +572,15 @@ func (db *DB) Delete(ctx context.Context, value any) *Result {
 	} else {
 		fmt.Printf("Successfully deleted %d record(s) for %s.\n", affected, model.Name)
 	}
+
+	// --- Call AfterDelete Hook ---
+	if model.HasAfterDelete && affected > 0 {
+		hookMethod := reflectValue.MethodByName("AfterDelete")
+		if err := callHook(ctx, db, hookMethod, structValue); err != nil {
+			fmt.Printf("Warning: AfterDelete hook failed: %v\n", err)
+		}
+	}
+	// --- End Hook Call ---
 
 	return result // Error will be nil if execution succeeded
 }
@@ -697,6 +744,15 @@ func (db *DB) FindFirst(ctx context.Context, dest any, conds ...any) *Result {
 
 	result.RowsAffected = 1 // Found and scanned one row
 	fmt.Printf("Successfully found and scanned first record into %s\n", destType.Name())
+
+	// --- Call AfterFind Hook ---
+	if model.HasAfterFind {
+		hookMethod := destValue.MethodByName("AfterFind")
+		if err := callHook(ctx, db, hookMethod, destElem); err != nil {
+			fmt.Printf("Warning: AfterFind hook failed for FindFirst: %v\n", err)
+		}
+	}
+	// --- End Hook Call ---
 	return result
 }
 
@@ -730,6 +786,16 @@ func (db *DB) Updates(ctx context.Context, modelWithValue any, data map[string]a
 		result.Error = fmt.Errorf("failed to parse schema for type %s: %w", structType.Name(), err)
 		return result
 	}
+
+	// --- Call BeforeUpdate Hook ---
+	if model.HasBeforeUpdate {
+		hookMethod := reflectValue.MethodByName("BeforeUpdate")
+		if err := callHookWithData(ctx, db, hookMethod, structValue, data); err != nil {
+			result.Error = fmt.Errorf("BeforeUpdate hook failed: %w", err)
+			return result
+		}
+	}
+	// --- End Hook Call ---
 
 	// 3. Extract Primary Key values for WHERE clause
 	if len(model.PrimaryKeys) == 0 {
@@ -814,6 +880,14 @@ func (db *DB) Updates(ctx context.Context, modelWithValue any, data map[string]a
 		fmt.Printf("Successfully updated %d record(s) for %s.\n", affected, model.Name)
 		// TODO: Optionally re-fetch the record to update the input modelWithValue?
 		// Similar logic to the re-fetch in Create.
+	}
+
+	// --- Call AfterUpdate Hook ---
+	if model.HasAfterUpdate && affected > 0 {
+		hookMethod := reflectValue.MethodByName("AfterUpdate")
+		if err := callHook(ctx, db, hookMethod, structValue); err != nil {
+			fmt.Printf("Warning: AfterUpdate hook failed: %v\n", err)
+		}
 	}
 
 	return result // Error will be nil if execution succeeded
@@ -933,6 +1007,9 @@ func (db *DB) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 
 	// 6. Iterate and Scan Rows into Slice (remains the same logic)
 	sliceValue.Set(reflect.MakeSlice(sliceValue.Type(), 0, 0))
+
+	var addedElements []reflect.Value // Store elements for AfterFind hooks
+
 	rowCount := 0
 	for rows.Next() {
 		rowCount++
@@ -955,9 +1032,12 @@ func (db *DB) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 			return result
 		}
 		if elementIsPointer {
-			sliceValue.Set(reflect.Append(sliceValue, newElemInstance.Addr()))
+			elemPtr := newElemInstance.Addr()
+			sliceValue.Set(reflect.Append(sliceValue, elemPtr))
+			addedElements = append(addedElements, elemPtr)
 		} else {
 			sliceValue.Set(reflect.Append(sliceValue, newElemInstance))
+			addedElements = append(addedElements, newElemInstance)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -966,6 +1046,53 @@ func (db *DB) Find(ctx context.Context, dest any, condsAndOpts ...any) *Result {
 	}
 	result.RowsAffected = int64(rowCount)
 	fmt.Printf("Successfully found and scanned %d record(s) into slice of %s\n", rowCount, elementType.Name())
+
+	// --- Call AfterFind Hook for each found element ---
+	if model.HasAfterFind && rowCount > 0 {
+		fmt.Printf("Calling AfterFind hook for %d elements...\n", len(addedElements))
+		for _, elemValue := range addedElements {
+			instanceValue := elemValue
+			hookMethod := instanceValue.MethodByName("AfterFind")
+			if hookMethod.IsValid() {
+				structValForHook := instanceValue
+				if instanceValue.Kind() == reflect.Pointer {
+					structValForHook = instanceValue.Elem()
+				}
+				if err := callHook(ctx, db, hookMethod, structValForHook); err != nil {
+					fmt.Printf("Warning: AfterFind hook failed for element: %v\n", err)
+				}
+			} else {
+				// This might happen if the hook is defined on the value receiver but the slice holds pointers,
+				// or vice-versa. The callHook helper tries both, but MethodByName needs the right receiver.
+				// Let's try getting the method on the pointer/value explicitly based on elemValue kind.
+				var method reflect.Value
+				if elemValue.Kind() == reflect.Pointer {
+					method = elemValue.MethodByName("AfterFind") // Check pointer first
+					if !method.IsValid() && elemValue.Elem().IsValid() {
+						method = elemValue.Elem().MethodByName("AfterFind") // Check value if pointer failed
+					}
+				} else { // elemValue is struct value
+					method = elemValue.MethodByName("AfterFind") // Check value first
+					if !method.IsValid() && elemValue.CanAddr() {
+						method = elemValue.Addr().MethodByName("AfterFind") // Check pointer if value failed
+					}
+				}
+
+				if method.IsValid() {
+					structValForHook := elemValue
+					if elemValue.Kind() == reflect.Pointer {
+						structValForHook = elemValue.Elem()
+					}
+					if err := callHook(ctx, db, method, structValForHook); err != nil {
+						fmt.Printf("Warning: AfterFind hook failed for element (fallback check): %v\n", err)
+					}
+				} else {
+					fmt.Printf("Warning: Could not find AfterFind method via reflection for element type %s\n", elemValue.Type())
+				}
+			}
+		}
+	}
+	// --- End Hook Call ---
 	return result
 }
 
