@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/chmenegatti/typegorm/pkg/config" // Use correct import path
+	"github.com/chmenegatti/typegorm/pkg/hooks"
 	"github.com/chmenegatti/typegorm/pkg/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,6 +37,153 @@ type CreateTestUser struct {
 	CreatedAt time.Time  // Auto not null
 	UpdatedAt *time.Time // Nullable time
 }
+
+// Struct specifically for testing hooks
+type HookUser struct {
+	ID    uint    `typegorm:"primaryKey"`
+	Name  string  `typegorm:"column:h_name;not null"`
+	Value string  // Another field
+	Notes *string `typegorm:"column:h_notes"`
+
+	// Non-persistent field to track hook calls
+	HookLog []string `typegorm:"-"`
+
+	// Flags to control hook behavior for tests
+	FailBeforeCreate bool `typegorm:"-"`
+	FailBeforeUpdate bool `typegorm:"-"`
+	FailBeforeDelete bool `typegorm:"-"`
+	ModifyUpdateData bool `typegorm:"-"`
+}
+
+// Ensure HookUser implements interfaces (compile-time check)
+var _ hooks.BeforeCreator = (*HookUser)(nil)
+var _ hooks.AfterCreator = (*HookUser)(nil)
+var _ hooks.BeforeUpdater = (*HookUser)(nil)
+var _ hooks.AfterUpdater = (*HookUser)(nil)
+var _ hooks.BeforeDeleter = (*HookUser)(nil)
+var _ hooks.AfterDeleter = (*HookUser)(nil)
+var _ hooks.AfterFinder = (*HookUser)(nil)
+
+func (u *HookUser) logHook(name string) {
+	fmt.Printf("Hook Called: %s for User ID %d, Name %s\n", name, u.ID, u.Name)
+	u.HookLog = append(u.HookLog, name)
+}
+
+// BeforeCreate hook implementation
+func (u *HookUser) BeforeCreate(ctx context.Context, db hooks.ContextDB) error {
+	u.logHook("BeforeCreate")
+	if u.Name == "" {
+		return errors.New("hook validation: name cannot be empty")
+	}
+	if u.FailBeforeCreate {
+		return errors.New("hook error: forced BeforeCreate failure")
+	}
+	u.Name = "Prefixed_" + u.Name // Modify data before create
+	return nil
+}
+
+// AfterCreate hook implementation
+func (u *HookUser) AfterCreate(ctx context.Context, db hooks.ContextDB) error {
+	u.logHook("AfterCreate")
+	// This hook runs after the record is created and ID is set (if auto-inc)
+	if u.ID == 0 {
+		fmt.Println("Warning: AfterCreate called but ID is still 0")
+	}
+	return nil
+}
+
+// BeforeUpdate hook implementation
+func (u *HookUser) BeforeUpdate(ctx context.Context, db hooks.ContextDB, data map[string]any) error {
+	u.logHook("BeforeUpdate")
+	if u.FailBeforeUpdate {
+		return errors.New("hook error: forced BeforeUpdate failure")
+	}
+	// Example: Modify the update data map
+	if u.ModifyUpdateData {
+		data["h_notes"] = ptr("Modified by BeforeUpdate hook")
+		fmt.Println("Hook modified update data map")
+	}
+	// Example: Validation based on data
+	if nameVal, ok := data["h_name"]; ok {
+		if nameStr, ok := nameVal.(string); ok && nameStr == "INVALID" {
+			return errors.New("hook validation: name cannot be 'INVALID'")
+		}
+	}
+	return nil
+}
+
+// AfterUpdate hook implementation
+func (u *HookUser) AfterUpdate(ctx context.Context, db hooks.ContextDB) error {
+	u.logHook("AfterUpdate")
+	return nil
+}
+
+// BeforeDelete hook implementation
+func (u *HookUser) BeforeDelete(ctx context.Context, db hooks.ContextDB) error {
+	u.logHook("BeforeDelete")
+	if u.FailBeforeDelete {
+		return errors.New("hook error: forced BeforeDelete failure")
+	}
+	if u.Name == "CannotDelete" {
+		return errors.New("hook validation: user 'CannotDelete' cannot be deleted")
+	}
+	return nil
+}
+
+// AfterDelete hook implementation
+func (u *HookUser) AfterDelete(ctx context.Context, db hooks.ContextDB) error {
+	u.logHook("AfterDelete")
+	return nil
+}
+
+// AfterFind hook implementation
+func (u *HookUser) AfterFind(ctx context.Context, db hooks.ContextDB) error {
+	u.logHook("AfterFind")
+	// Example: Load related data or perform calculations
+	u.Value = fmt.Sprintf("Found User %d", u.ID) // Set a non-persistent field
+	return nil
+}
+
+// --- Test Setup Helper (Modified slightly for HookUser table) ---
+func setupHookIntegrationTest(t *testing.T) (context.Context, *DB, *schema.Model) {
+	t.Helper()
+	dialectEnv := os.Getenv("TYPEGORM_TEST_DIALECT")
+	dsnEnv := os.Getenv("TYPEGORM_TEST_DSN")
+	if dialectEnv == "" || dsnEnv == "" {
+		t.Skip("Skipping integration test: TYPEGORM_TEST_DIALECT and TYPEGORM_TEST_DSN environment variables must be set.")
+	}
+	cfg := config.Config{Database: config.DatabaseConfig{Dialect: dialectEnv, DSN: dsnEnv}}
+	ctx := context.Background()
+	db, err := Open(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, db)
+
+	// Use HookUser for schema parsing and AutoMigrate
+	model, err := db.GetModel(&HookUser{})
+	require.NoError(t, err)
+	require.NotNil(t, model)
+	require.NotEmpty(t, model.TableName)
+	tableNameQuoted := db.source.Dialect().Quote(model.TableName)
+
+	t.Cleanup(func() { assert.NoError(t, db.Close(), "Error closing test DB connection") })
+	t.Cleanup(func() {
+		dropSQL := fmt.Sprintf("DROP TABLE IF EXISTS %s", tableNameQuoted)
+		_, dropErr := db.source.Exec(context.Background(), dropSQL)
+		assert.NoError(t, dropErr, "Failed to drop table after test")
+	})
+
+	fmt.Printf("Ensuring table %s exists for test %s...\n", tableNameQuoted, t.Name())
+	err = db.AutoMigrate(ctx, &HookUser{})
+	require.NoError(t, err) // Migrate HookUser table
+	fmt.Printf("Cleaning up table %s before test %s...\n", tableNameQuoted, t.Name())
+	cleanupSQL := fmt.Sprintf("DELETE FROM %s", tableNameQuoted)
+	_, delErr := db.source.Exec(ctx, cleanupSQL)
+	require.NoError(t, delErr)
+	return ctx, db, model
+}
+
+// Helper function to create a pointer to a string
+func ptr(s string) *string { return &s }
 
 // --- Test Setup Helper ---
 
@@ -1063,9 +1211,6 @@ func createOperatorTestUsers(ctx context.Context, t *testing.T, db *DB) map[stri
 	return users
 }
 
-// Helper function to create a pointer to a string
-func ptr(s string) *string { return &s }
-
 func TestDBFind_Operator_Comparison(t *testing.T) {
 	ctx, db, model := setupIntegrationTest(t)
 	_ = createOperatorTestUsers(ctx, t, db)
@@ -1236,4 +1381,195 @@ func TestDBFind_Operator_Multiple(t *testing.T) {
 	require.Len(t, users, 2) // Bob (40), Carol (35)
 	assert.Equal(t, "Bob", users[0].Name)
 	assert.Equal(t, "Carol", users[1].Name)
+}
+
+// --- NEW Tests for Hooks ---
+
+func TestHooks_Create(t *testing.T) {
+	ctx, db, _ := setupHookIntegrationTest(t)
+
+	// Test successful create with hooks
+	user1 := HookUser{ID: 1, Name: "HookTest1", Value: "Initial"} // Use manual ID as no auto-inc
+	res1 := db.Create(ctx, &user1)
+	require.NoError(t, res1.Error, "Create failed unexpectedly")
+
+	// Verify hooks were called
+	require.Contains(t, user1.HookLog, "BeforeCreate")
+	require.Contains(t, user1.HookLog, "AfterCreate")
+
+	// Verify data modification by hook
+	assert.Equal(t, "Prefixed_HookTest1", user1.Name)
+
+	// Verify record in DB
+	var foundUser1 HookUser
+	resFind1 := db.FindByID(ctx, &foundUser1, user1.ID)
+	require.NoError(t, resFind1.Error)
+	assert.Equal(t, "Prefixed_HookTest1", foundUser1.Name) // Name should be prefixed in DB
+
+	// Test BeforeCreate failure
+	user2 := HookUser{ID: 2, Name: "HookFail", FailBeforeCreate: true}
+	res2 := db.Create(ctx, &user2)
+	require.Error(t, res2.Error, "Create should fail due to BeforeCreate error")
+	assert.Contains(t, res2.Error.Error(), "BeforeCreate hook failed")
+	assert.Contains(t, res2.Error.Error(), "forced BeforeCreate failure")
+	require.Contains(t, user2.HookLog, "BeforeCreate")   // Before hook should still be logged
+	require.NotContains(t, user2.HookLog, "AfterCreate") // After hook should not run
+
+	// Verify record was not created
+	var foundUser2 HookUser
+	resFind2 := db.FindByID(ctx, &foundUser2, user2.ID)
+	require.Error(t, resFind2.Error)
+	assert.True(t, errors.Is(resFind2.Error, sql.ErrNoRows))
+
+	// Test BeforeCreate validation failure
+	user3 := HookUser{ID: 3, Name: ""} // Empty name should fail hook validation
+	res3 := db.Create(ctx, &user3)
+	require.Error(t, res3.Error)
+	assert.Contains(t, res3.Error.Error(), "hook validation: name cannot be empty")
+}
+
+func TestHooks_Updates(t *testing.T) {
+	ctx, db, model := setupHookIntegrationTest(t)
+
+	// 1. Arrange: Create a record
+	user := HookUser{ID: 10, Name: "UpdateHookStart"}
+	res := db.Create(ctx, &user)
+	require.NoError(t, res.Error)
+	user.HookLog = nil // Reset log after create hooks
+
+	// 2. Test successful update with hooks
+	nameCol, _ := model.GetFieldByDBName("h_name")
+	notesCol, _ := model.GetFieldByDBName("h_notes")
+	updateData1 := map[string]any{
+		nameCol.DBName:  "UpdateHookSuccess",
+		notesCol.DBName: ptr("Original Notes"),
+	}
+	user.ModifyUpdateData = true // Tell hook to modify data
+	res1 := db.Updates(ctx, &user, updateData1)
+	require.NoError(t, res1.Error)
+	require.Contains(t, user.HookLog, "BeforeUpdate")
+	require.Contains(t, user.HookLog, "AfterUpdate")
+
+	// Verify update and hook modification
+	var foundUser1 HookUser
+	resFind1 := db.FindByID(ctx, &foundUser1, user.ID)
+	require.NoError(t, resFind1.Error)
+	assert.Equal(t, "UpdateHookSuccess", foundUser1.Name) // Name updated by input map
+	require.NotNil(t, foundUser1.Notes)
+	assert.Equal(t, "Modified by BeforeUpdate hook", *foundUser1.Notes) // Notes updated by hook
+
+	// 3. Test BeforeUpdate failure
+	user.HookLog = nil // Reset log
+	user.FailBeforeUpdate = true
+	updateData2 := map[string]any{nameCol.DBName: "UpdateShouldFail"}
+	res2 := db.Updates(ctx, &user, updateData2)
+	require.Error(t, res2.Error)
+	assert.Contains(t, res2.Error.Error(), "BeforeUpdate hook failed")
+	assert.Contains(t, res2.Error.Error(), "forced BeforeUpdate failure")
+	require.Contains(t, user.HookLog, "BeforeUpdate")
+	require.NotContains(t, user.HookLog, "AfterUpdate")
+
+	// Verify data was not updated
+	var foundUser2 HookUser
+	resFind2 := db.FindByID(ctx, &foundUser2, user.ID)
+	require.NoError(t, resFind2.Error)
+	assert.Equal(t, "UpdateHookSuccess", foundUser2.Name) // Name should still be from previous successful update
+
+	// 4. Test BeforeUpdate validation failure
+	user.HookLog = nil
+	user.FailBeforeUpdate = false
+	updateData3 := map[string]any{nameCol.DBName: "INVALID"} // Hook prevents this name
+	res3 := db.Updates(ctx, &user, updateData3)
+	require.Error(t, res3.Error)
+	assert.Contains(t, res3.Error.Error(), "hook validation: name cannot be 'INVALID'")
+}
+
+func TestHooks_Delete(t *testing.T) {
+	ctx, db, _ := setupHookIntegrationTest(t)
+
+	// 1. Arrange: Create records
+	user1 := HookUser{ID: 20, Name: "DeleteHookSuccess"}
+	user2 := HookUser{ID: 21, Name: "DeleteHookFail", FailBeforeDelete: true}
+	user3 := HookUser{ID: 22, Name: "CannotDelete"} // Hook prevents deleting this name
+	res1 := db.Create(ctx, &user1)
+	require.NoError(t, res1.Error)
+	res2 := db.Create(ctx, &user2)
+	require.NoError(t, res2.Error)
+	res3 := db.Create(ctx, &user3)
+	require.NoError(t, res3.Error)
+
+	// 2. Test successful delete
+	user1.HookLog = nil // Reset log
+	delRes1 := db.Delete(ctx, &user1)
+	require.NoError(t, delRes1.Error)
+	assert.EqualValues(t, 1, delRes1.RowsAffected)
+	require.Contains(t, user1.HookLog, "BeforeDelete")
+	require.Contains(t, user1.HookLog, "AfterDelete")
+	// Verify deleted
+	findRes1 := db.FindByID(ctx, &HookUser{}, user1.ID)
+	require.Error(t, findRes1.Error)
+	assert.True(t, errors.Is(findRes1.Error, sql.ErrNoRows))
+
+	// 3. Test BeforeDelete failure
+	user2.HookLog = nil
+	delRes2 := db.Delete(ctx, &user2)
+	require.Error(t, delRes2.Error)
+	assert.Contains(t, delRes2.Error.Error(), "BeforeDelete hook failed")
+	assert.Contains(t, delRes2.Error.Error(), "forced BeforeDelete failure")
+	require.Contains(t, user2.HookLog, "BeforeDelete")
+	require.NotContains(t, user2.HookLog, "AfterDelete")
+	// Verify not deleted
+	findRes2 := db.FindByID(ctx, &HookUser{}, user2.ID)
+	require.NoError(t, findRes2.Error)
+
+	// 4. Test BeforeDelete validation failure
+	user3.HookLog = nil
+	delRes3 := db.Delete(ctx, &user3)
+	require.Error(t, delRes3.Error)
+	assert.Contains(t, delRes3.Error.Error(), "hook validation: user 'CannotDelete' cannot be deleted")
+	// Verify not deleted
+	findRes3 := db.FindByID(ctx, &HookUser{}, user3.ID)
+	require.NoError(t, findRes3.Error)
+}
+
+func TestHooks_Find(t *testing.T) {
+	ctx, db, _ := setupHookIntegrationTest(t)
+
+	// 1. Arrange: Create records
+	user1 := HookUser{ID: 30, Name: "FindHook1"}
+	user2 := HookUser{ID: 31, Name: "FindHook2"}
+	res1 := db.Create(ctx, &user1)
+	require.NoError(t, res1.Error)
+	res2 := db.Create(ctx, &user2)
+	require.NoError(t, res2.Error)
+
+	// 2. Test AfterFind for FindByID
+	var foundUser1 HookUser
+	findRes1 := db.FindByID(ctx, &foundUser1, user1.ID)
+	require.NoError(t, findRes1.Error)
+	require.Contains(t, foundUser1.HookLog, "AfterFind")
+	assert.Equal(t, fmt.Sprintf("Found User %d", user1.ID), foundUser1.Value) // Check field set by hook
+
+	// 3. Test AfterFind for FindFirst
+	var foundUser2 HookUser
+	findRes2 := db.FindFirst(ctx, &foundUser2, &HookUser{Name: user2.Name})
+	require.NoError(t, findRes2.Error)
+	require.Contains(t, foundUser2.HookLog, "AfterFind")
+	assert.Equal(t, fmt.Sprintf("Found User %d", user2.ID), foundUser2.Value)
+
+	// 4. Test AfterFind for Find (multiple records)
+	var foundUsers []*HookUser // Use slice of pointers
+	findResAll := db.Find(ctx, &foundUsers)
+	require.NoError(t, findResAll.Error)
+	require.Len(t, foundUsers, 2)
+	// Check hooks were called for both
+	hookCount := 0
+	for _, uPtr := range foundUsers {
+		require.NotNil(t, uPtr)
+		if assert.Contains(t, uPtr.HookLog, "AfterFind") {
+			hookCount++
+		}
+		assert.Equal(t, fmt.Sprintf("Found User %d", uPtr.ID), uPtr.Value)
+	}
+	assert.Equal(t, 2, hookCount, "AfterFind hook should have run for both users")
 }
