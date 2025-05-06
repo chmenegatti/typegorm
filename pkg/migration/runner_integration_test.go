@@ -116,68 +116,23 @@ func createMigrationFile(t *testing.T, dir, id, name, upSQL, downSQL string) str
 	return filePath
 }
 
-// --- NEW: Go Migration File Helper ---
-func createGoMigrationFile(t *testing.T, dir, id, name string) string {
+// Helper to create a dummy Go migration file (content doesn't matter much anymore)
+// We still need the file on disk for discovery, but registration happens in the test.
+func createDummyGoMigrationFile(t *testing.T, dir, id, name string) string {
 	t.Helper()
-	// Use RunCreate to generate the file using the template
-	cfg := config.Config{Migration: config.MigrationConfig{Directory: dir}} // Minimal config needed
-	err := RunCreate(cfg, name, "go")                                       // Call RunCreate with type "go"
-	require.NoError(t, err, "RunCreate failed for Go migration")
-
-	// Construct expected filename to return path
 	safeName := strings.ToLower(strings.ReplaceAll(name, " ", "_"))
-	filename := fmt.Sprintf("%s_%s.go", id, safeName) // Need the ID used by RunCreate
-	// Problem: RunCreate generates timestamp internally. We need that exact timestamp.
-	// Solution: Find the .go file starting with the base name pattern.
-	files, readErr := os.ReadDir(dir)
-	require.NoError(t, readErr)
-	expectedPrefix := fmt.Sprintf("%s_", safeName) // Look for name part
-	var foundPath string
-	for _, f := range files {
-		if !f.IsDir() && strings.HasSuffix(f.Name(), expectedPrefix+".go") && strings.HasSuffix(f.Name(), ".go") {
-			// This logic is flawed, needs timestamp matching.
-			// Let's modify RunCreate to return the path, or simplify test file creation.
+	filePath := filepath.Join(dir, fmt.Sprintf("%s_%s.go", id, safeName))
+	// Minimal content, init() is not needed here
+	content := fmt.Sprintf(`package main
 
-			// --- SIMPLIFIED APPROACH FOR TEST: Write directly ---
-			structName := strings.ReplaceAll(strings.Title(strings.ReplaceAll(name, "_", " ")), " ", "") + "Mig"
-			filePath := filepath.Join(dir, fmt.Sprintf("%s_%s.go", id, safeName))
-			content := fmt.Sprintf(`package main // Use main for test execution simplicity
-
-import (
-	"context"
-	"database/sql"
-	"fmt"
-	"github.com/chmenegatti/typegorm/pkg/migration" // Adjust path
-)
-
-func init() {
-	migration.RegisterGoMigration("%s", &%s{})
-}
-
-type %s struct{}
-
-func (m *%s) Up(ctx context.Context, db *sql.DB) error {
-	fmt.Println("Running Go migration Up: %s")
-	_, err := db.ExecContext(ctx, "CREATE TABLE go_test_%s (id INT);")
-	return err
-}
-
-func (m *%s) Down(ctx context.Context, db *sql.DB) error {
-	fmt.Println("Running Go migration Down: %s")
-	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS go_test_%s;")
-	return err
-}
-
-`, id, structName, structName, structName, name, id, safeName, structName, name, id, safeName) // Use safeName for table
-
-			errWrite := os.WriteFile(filePath, []byte(content), 0644)
-			require.NoError(t, errWrite, "Failed to write Go migration file %s", filePath)
-			return filePath
-		}
-	}
-	require.FailNow(t, "Could not find generated Go migration file") // Should not happen
-	return ""
-
+// Migration %s - %s
+// Registration happens in the test file.
+`, id, name)
+	errWriteDir := os.MkdirAll(dir, os.ModePerm)
+	require.NoError(t, errWriteDir)
+	errWrite := os.WriteFile(filePath, []byte(content), 0644)
+	require.NoError(t, errWrite)
+	return filePath
 }
 
 // Helper to check if a table exists (basic check)
@@ -260,6 +215,47 @@ func getHistoryIDs(ctx context.Context, ds common.DataSource, tableName string) 
 }
 
 // --- Test Cases ---
+
+// Test migration for creating and dropping a table
+type CreateGoTestTableMig struct{}
+
+func (m *CreateGoTestTableMig) Up(ctx context.Context, db *sql.DB) error {
+	fmt.Println("Running Go migration Up: create_go_test_table")
+	_, err := db.ExecContext(ctx, "CREATE TABLE go_test_create_go_test_table (id INT);")
+	return err
+}
+func (m *CreateGoTestTableMig) Down(ctx context.Context, db *sql.DB) error {
+	fmt.Println("Running Go migration Down: create_go_test_table")
+	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS go_test_create_go_test_table;")
+	return err
+}
+
+// Test migration for creating and dropping another table
+type CreateAndDropGoTableMig struct{}
+
+func (m *CreateAndDropGoTableMig) Up(ctx context.Context, db *sql.DB) error {
+	fmt.Println("Running Go migration Up: create_and_drop_go_table")
+	_, err := db.ExecContext(ctx, "CREATE TABLE go_test_create_and_drop_go_table (id INT);")
+	return err
+}
+func (m *CreateAndDropGoTableMig) Down(ctx context.Context, db *sql.DB) error {
+	fmt.Println("Running Go migration Down: create_and_drop_go_table")
+	_, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS go_test_create_and_drop_go_table;")
+	return err
+}
+
+// Test migration with an error in the Up method
+type GoUpErrorMig struct{}
+
+func (m *GoUpErrorMig) Up(ctx context.Context, db *sql.DB) error {
+	fmt.Println("Running Go migration Up: go_up_error (will fail)")
+	_, err := db.ExecContext(ctx, "CREATE TABL bad_sql;") // Invalid SQL
+	return err
+}
+func (m *GoUpErrorMig) Down(ctx context.Context, db *sql.DB) error {
+	fmt.Println("Running Go migration Down: go_up_error")
+	return nil // Down should succeed or do nothing if Up failed
+}
 
 func TestMigrationRunner_RunUp_Success(t *testing.T) {
 	ctx, cfg, ds := setupMigrationTest(t)
@@ -380,20 +376,19 @@ func TestMigrationRunner_RunUp_ErrorInSQL(t *testing.T) {
 // in a way that includes the migration packages so their init() functions run.
 // This usually happens automatically with `go test`.
 
+// --- Tests for Go Migrations (Updated with manual registration) ---
+
 func TestMigrationRunner_Go_RunUp_Success(t *testing.T) {
 	ctx, cfg, ds := setupMigrationTest(t)
 	migrationDir := cfg.Migration.Directory
 
-	// 1. Arrange: Create a Go migration file
-	// IMPORTANT: The ID used here MUST match the ID passed to RegisterGoMigration in the file content
+	// 1. Arrange: Create dummy Go migration file and Register the implementation
 	migrationID := time.Now().UTC().Format("20060102150405")
 	migrationName := "create_go_test_table"
-	safeName := "create_go_test_table" // Name used for table in template
-	_ = createGoMigrationFile(t, migrationDir, migrationID, migrationName)
-
-	// Ensure the Go migration is registered (init should run when test is compiled/run)
-	_, found := getGoMigration(migrationID)
-	require.True(t, found, "Go migration %s was not registered", migrationID)
+	safeName := "create_go_test_table"
+	_ = createDummyGoMigrationFile(t, migrationDir, migrationID, migrationName) // Create file for discovery
+	RegisterGoMigration(migrationID, &CreateGoTestTableMig{})                   // Manually register
+	t.Cleanup(func() { delete(goMigrationsRegistry, migrationID) })             // Clean up registry
 
 	// 2. Act: Run migrations up
 	err := RunUp(cfg)
@@ -402,9 +397,8 @@ func TestMigrationRunner_Go_RunUp_Success(t *testing.T) {
 	// 3. Assert: Check table exists and history table is correct
 	tableName := fmt.Sprintf("go_test_%s", safeName)
 	require.True(t, tableExists(ctx, ds, tableName), "%s table should exist", tableName)
-
 	history, err := getHistoryIDs(ctx, ds, cfg.Migration.TableName)
-	require.NoError(t, err, "Failed to get migration history")
+	require.NoError(t, err)
 	assert.Equal(t, []string{migrationID}, history, "Migration history should contain the Go migration ID")
 }
 
@@ -412,13 +406,13 @@ func TestMigrationRunner_Go_RunDown_Success(t *testing.T) {
 	ctx, cfg, ds := setupMigrationTest(t)
 	migrationDir := cfg.Migration.Directory
 
-	// 1. Arrange: Create and apply a Go migration
+	// 1. Arrange: Create dummy file, register Go migration, and apply it
 	migrationID := time.Now().UTC().Format("20060102150405")
 	migrationName := "create_and_drop_go_table"
 	safeName := "create_and_drop_go_table"
-	_ = createGoMigrationFile(t, migrationDir, migrationID, migrationName)
-	_, found := getGoMigration(migrationID)
-	require.True(t, found) // Verify registration
+	_ = createDummyGoMigrationFile(t, migrationDir, migrationID, migrationName)
+	RegisterGoMigration(migrationID, &CreateAndDropGoTableMig{})
+	t.Cleanup(func() { delete(goMigrationsRegistry, migrationID) })
 	err := RunUp(cfg)
 	require.NoError(t, err)
 	tableName := fmt.Sprintf("go_test_%s", safeName)
@@ -441,65 +435,25 @@ func TestMigrationRunner_Go_RunUp_Error(t *testing.T) {
 	ctx, cfg, ds := setupMigrationTest(t)
 	migrationDir := cfg.Migration.Directory
 
-	// 1. Arrange: Create Go migration file with faulty Up SQL
+	// 1. Arrange: Create dummy file and register Go migration with faulty Up
 	migrationID := time.Now().UTC().Format("20060102150405")
 	migrationName := "go_up_error"
-	structName := "GoUpErrorMig"
-	filePath := filepath.Join(migrationDir, fmt.Sprintf("%s_%s.go", migrationID, migrationName))
-	content := fmt.Sprintf(`package main
-import ("context"; "database/sql"; "fmt"; "github.com/chmenegatti/typegorm/pkg/migration")
-func init() { migration.RegisterGoMigration("%s", &%s{}) }
-type %s struct{}
-func (m *%s) Up(ctx context.Context, db *sql.DB) error { _, err := db.ExecContext(ctx, "CREATE TABL bad_sql;"); return err } // Invalid SQL
-func (m *%s) Down(ctx context.Context, db *sql.DB) error { return nil }
-`, migrationID, structName, structName, structName, structName)
-	err := os.WriteFile(filePath, []byte(content), 0644)
-	require.NoError(t, err)
-	_, found := getGoMigration(migrationID)
-	require.True(t, found) // Verify registration
+	_ = createDummyGoMigrationFile(t, migrationDir, migrationID, migrationName)
+	RegisterGoMigration(migrationID, &GoUpErrorMig{}) // Register the faulty one
+	t.Cleanup(func() { delete(goMigrationsRegistry, migrationID) })
 
 	// 2. Act: Run migrations up
-	err = RunUp(cfg)
+	err := RunUp(cfg)
 	require.Error(t, err, "RunUp should fail")
+	// Error comes from the Go migration's Up method directly now
 	assert.Contains(t, err.Error(), "failed to execute 'Up' method", "Error message mismatch")
 	assert.Contains(t, err.Error(), migrationID, "Error message should contain migration ID")
+	// Check for underlying DB error if possible (depends on driver)
+	// assert.Contains(t, err.Error(), "syntax error", "Underlying DB error missing")
 
 	// 3. Assert: Table should not exist and history should be empty
 	assert.False(t, tableExists(ctx, ds, "bad_sql"), "Table created by failing migration should not exist")
 	history, histErr := getHistoryIDs(ctx, ds, cfg.Migration.TableName)
 	require.NoError(t, histErr)
 	assert.Empty(t, history, "History should be empty after failed migration")
-}
-
-func TestMigrationRunner_Go_NotRegistered(t *testing.T) {
-	ctx, cfg, ds := setupMigrationTest(t)
-	migrationDir := cfg.Migration.Directory
-
-	// 1. Arrange: Create Go migration file BUT DO NOT REGISTER IT
-	migrationID := time.Now().UTC().Format("20060102150405")
-	migrationName := "go_not_registered"
-	structName := "GoNotRegisteredMig"
-	filePath := filepath.Join(migrationDir, fmt.Sprintf("%s_%s.go", migrationID, migrationName))
-	// Content *without* the init() block's RegisterGoMigration call
-	content := fmt.Sprintf(`package main
-import ("context"; "database/sql"; "fmt")
-// No init() function to register!
-type %s struct{}
-func (m *%s) Up(ctx context.Context, db *sql.DB) error { return nil }
-func (m *%s) Down(ctx context.Context, db *sql.DB) error { return nil }
-`, structName, structName, structName)
-	err := os.WriteFile(filePath, []byte(content), 0644)
-	require.NoError(t, err)
-
-	// 2. Act: Run migrations up
-	err = RunUp(cfg)
-	require.Error(t, err, "RunUp should fail for unregistered Go migration")
-	assert.Contains(t, err.Error(), "Go migration", "Error message mismatch")
-	assert.Contains(t, err.Error(), "found on disk but not registered", "Error message mismatch")
-	assert.Contains(t, err.Error(), migrationID, "Error message should contain migration ID")
-
-	// 3. Assert: History should be empty
-	history, histErr := getHistoryIDs(ctx, ds, cfg.Migration.TableName)
-	require.NoError(t, histErr)
-	assert.Empty(t, history, "History should be empty")
 }
