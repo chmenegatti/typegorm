@@ -336,106 +336,103 @@ func RunStatus(cfg config.Config) error {
 // RunUp applies pending migrations.
 func RunUp(cfg config.Config) error {
 	fmt.Println("Running Migrate Up...")
-	ctx := context.Background() // Use a background context
+	ctx := context.Background()
 
-	// 1. Get DataSource
+	// 1. Connect to DB
 	ds, err := getDataSource(cfg.Database)
 	if err != nil {
 		return fmt.Errorf("failed to initialize data source for migrate up: %w", err)
 	}
 	defer ds.Close()
-
-	// 2. Ensure Migrations Table
+	dialect := ds.Dialect()
 	migrationTable := cfg.Migration.TableName
 	if migrationTable == "" {
 		return fmt.Errorf("migration table name is not configured")
 	}
+
+	// 2. Ensure History Table Exists
 	if err := ensureMigrationsTable(ctx, ds, migrationTable); err != nil {
 		return err
 	}
 
-	// 3. Find Migration Files
+	// 3. Find Disk Migrations & Applied Migrations
 	diskMigrations, err := findMigrationFiles(cfg.Migration.Directory)
 	if err != nil {
 		return err
 	}
-
-	// 4. Get Applied Migrations
-	appliedMigrationsList, err := getAppliedMigrationsOrdered(ctx, ds, migrationTable, "ASC")
+	appliedList, err := getAppliedMigrationsOrdered(ctx, ds, migrationTable, "ASC")
 	if err != nil {
 		return err
 	}
-	dbMigrationsMap := make(map[string]time.Time, len(appliedMigrationsList))
-
-	for _, rec := range appliedMigrationsList {
-		dbMigrationsMap[rec.ID] = rec.AppliedAt
+	appliedMap := make(map[string]bool, len(appliedList))
+	for _, rec := range appliedList {
+		appliedMap[rec.ID] = true
 	}
 
-	// 5. Determine & Process Pending Migrations
-	dialect := ds.Dialect() // Get dialect for SQL generation
+	// 4. Determine & Execute Pending Migrations
 	pendingCount := 0
 	appliedCount := 0
-
 	fmt.Println("Applying pending migrations...")
 	for _, mf := range diskMigrations {
-		if _, applied := dbMigrationsMap[mf.ID]; !applied {
+		if _, applied := appliedMap[mf.ID]; !applied {
 			pendingCount++
 			fmt.Printf("--> Applying migration %s (%s)...\n", mf.ID, mf.Name)
 
-			// Read and parse the file
+			// Read and parse SQL
 			file, err := os.Open(mf.Path)
 			if err != nil {
 				return fmt.Errorf("failed to open migration file '%s': %w", mf.Path, err)
 			}
-			upSQL, _, err := parseSQLMigration(file) // We only need 'Up' SQL here
-			file.Close()                             // Close the file handle promptly
+			upSQL, _, err := parseSQLMigration(file)
+			file.Close()
 			if err != nil {
 				return fmt.Errorf("failed to parse migration file '%s': %w", mf.Path, err)
 			}
 
 			trimmedUpSQL := strings.TrimSpace(upSQL)
-
-			// Execute in Transaction
-			tx, err := ds.BeginTx(ctx, nil) // Use default transaction options
-			if err != nil {
-				return fmt.Errorf("failed to begin transaction for migration %s: %w", mf.ID, err)
+			if trimmedUpSQL == "" {
+				fmt.Printf("    Skipping migration %s: No 'Up' SQL found.\n", mf.ID)
+				// We still need to record it as applied even if empty
 			}
 
-			// Execute 'Up' SQL only if it's not empty
-			if trimmedUpSQL != "" {
-				if _, err := tx.Exec(ctx, trimmedUpSQL); err != nil {
-					// Attempt rollback before returning error
-					if rollbackErr := tx.Rollback(); rollbackErr != nil {
-						fmt.Printf("WARNING: Failed to rollback transaction for migration %s after execution error: %v\n", mf.ID, rollbackErr)
+			// Execute within a transaction
+			err = func() error { // Use anonymous func for easier tx management
+				txHandle, err := ds.BeginTx(ctx, nil) // Begin transaction
+				if err != nil {
+					return fmt.Errorf("failed to begin transaction for migration %s: %w", mf.ID, err)
+				}
+				defer txHandle.Rollback() // Ensure rollback happens if commit isn't reached
+
+				// Execute Up SQL if present
+				if trimmedUpSQL != "" {
+					fmt.Printf("    Executing Up SQL...\n")
+					if _, err := txHandle.Exec(ctx, trimmedUpSQL); err != nil {
+						return fmt.Errorf("failed to execute 'Up' SQL for migration %s: %w", mf.ID, err)
 					}
-					return fmt.Errorf("failed to execute 'Up' SQL for migration %s: %w", mf.ID, err)
+					fmt.Printf("    'Up' SQL executed successfully.\n")
 				}
-				fmt.Printf("    Executed 'Up' SQL successfully for %s.\n", mf.ID)
-			} else {
-				// Log that we are skipping execution but will record it
-				fmt.Printf("    No 'Up' SQL to execute for %s, recording as applied.\n", mf.ID)
-			}
 
-			// Insert record into migration table (always record, even if SQL was empty)
-			insertSQL := dialect.InsertMigrationSQL(migrationTable)
-			appliedTimestamp := time.Now().UTC() // Record time applied (use UTC)
-			if _, err := tx.Exec(ctx, insertSQL, mf.ID, appliedTimestamp); err != nil {
-				// Attempt rollback before returning error
-				if rollbackErr := tx.Rollback(); rollbackErr != nil {
-					fmt.Printf("WARNING: Failed to rollback transaction for migration %s after recording error: %v\n", mf.ID, rollbackErr)
+				// Record migration in history table
+				insertSQL := dialect.InsertMigrationSQL(migrationTable)
+				appliedTimestamp := time.Now().UTC()
+				if _, err := txHandle.Exec(ctx, insertSQL, mf.ID, appliedTimestamp); err != nil {
+					return fmt.Errorf("failed to record migration %s in history table: %w", mf.ID, err)
 				}
-				return fmt.Errorf("failed to record migration %s in history table: %w", mf.ID, err)
+				fmt.Printf("    Recorded migration %s in history table.\n", mf.ID)
+
+				// Commit transaction
+				if err := txHandle.Commit(); err != nil {
+					return fmt.Errorf("failed to commit transaction for migration %s: %w", mf.ID, err)
+				}
+				return nil // Success
+			}() // End anonymous func
+
+			if err != nil {
+				return err // Return error from transaction block
 			}
 
-			// Commit transaction
-			if err := tx.Commit(); err != nil {
-				// Commit failed, transaction might be implicitly rolled back by DB depending on the error
-				return fmt.Errorf("failed to commit transaction for migration %s: %w", mf.ID, err)
-			}
-
-			fmt.Printf("--> Successfully applied and recorded migration %s.\n", mf.ID)
+			fmt.Printf("--> Successfully applied migration %s.\n", mf.ID)
 			appliedCount++
-
 		} // end if !applied
 	} // end for diskMigrations
 
@@ -444,7 +441,6 @@ func RunUp(cfg config.Config) error {
 	} else {
 		fmt.Printf("Finished applying migrations. Applied %d migration(s).\n", appliedCount)
 	}
-
 	return nil
 }
 
@@ -453,53 +449,49 @@ func RunUp(cfg config.Config) error {
 func RunDown(cfg config.Config, steps int) error {
 	fmt.Println("Running Migrate Down...")
 	if steps <= 0 {
-		fmt.Println("No steps specified for rollback. Use --steps N (where N > 0).")
-		return nil // Not an error, just nothing to do.
+		fmt.Println("No steps specified for rollback (steps must be > 0).")
+		return nil
 	}
 	fmt.Printf("  Steps to revert: %d\n", steps)
 	ctx := context.Background()
 
-	// 1. Get DataSource
+	// 1. Connect to DB
 	ds, err := getDataSource(cfg.Database)
 	if err != nil {
 		return fmt.Errorf("failed to initialize data source for migrate down: %w", err)
 	}
 	defer ds.Close()
-
-	// 2. Ensure Migrations Table (optional, but good for consistency)
+	dialect := ds.Dialect()
 	migrationTable := cfg.Migration.TableName
 	if migrationTable == "" {
 		return fmt.Errorf("migration table name is not configured")
 	}
-	// Don't strictly need to ensure table for down, but checking doesn't hurt
+
+	// 2. Ensure History Table Exists (optional but good check)
 	if err := ensureMigrationsTable(ctx, ds, migrationTable); err != nil {
-		// If ensuring fails, likely can't query applied anyway
-		return fmt.Errorf("failed checking migration history table: %w", err)
+		return err
 	}
 
 	// 3. Get Applied Migrations (Ordered DESC)
-	// We need them ordered descending to get the latest ones first
 	appliedMigrations, err := getAppliedMigrationsOrdered(ctx, ds, migrationTable, "DESC")
 	if err != nil {
-		return err // Error already includes context
+		return err
 	}
-
 	if len(appliedMigrations) == 0 {
 		fmt.Println("No migrations have been applied yet. Nothing to revert.")
 		return nil
 	}
 
-	// 4. Determine migrations to revert
+	// 4. Determine Migrations to Revert
 	if steps > len(appliedMigrations) {
-		fmt.Printf("Requested %d steps rollback, but only %d migrations are applied. Reverting all applied migrations.\n", steps, len(appliedMigrations))
+		fmt.Printf("Requested %d steps rollback, but only %d migrations are applied. Reverting all.\n", steps, len(appliedMigrations))
 		steps = len(appliedMigrations)
 	}
 	migrationsToRevert := appliedMigrations[:steps]
 
-	// 5. Find corresponding migration files on disk (build a map for quick lookup)
+	// 5. Find Corresponding Disk Files (build map for lookup)
 	diskFiles, err := findMigrationFiles(cfg.Migration.Directory)
 	if err != nil {
-		// If directory doesn't exist, we likely can't revert
 		return fmt.Errorf("cannot find migration files needed for rollback: %w", err)
 	}
 	diskFilesMap := make(map[string]migrationFile, len(diskFiles))
@@ -507,23 +499,19 @@ func RunDown(cfg config.Config, steps int) error {
 		diskFilesMap[mf.ID] = mf
 	}
 
-	// 6. Process migrations to revert (in reverse order of application)
-	dialect := ds.Dialect()
+	// 6. Process Reverts
 	revertedCount := 0
 	fmt.Printf("Reverting the last %d applied migration(s)...\n", len(migrationsToRevert))
-
 	for _, migrationRecord := range migrationsToRevert {
 		fmt.Printf("--> Reverting migration %s...\n", migrationRecord.ID)
 
-		// Find the file
+		// Find file
 		mf, found := diskFilesMap[migrationRecord.ID]
 		if !found {
-			// This is problematic, can't run 'Down' SQL without the file.
-			return fmt.Errorf("cannot revert migration %s: corresponding file not found in %s",
-				migrationRecord.ID, cfg.Migration.Directory)
+			return fmt.Errorf("cannot revert migration %s: corresponding file not found in %s", migrationRecord.ID, cfg.Migration.Directory)
 		}
 
-		// Parse the file for 'Down' SQL
+		// Parse file for Down SQL
 		file, err := os.Open(mf.Path)
 		if err != nil {
 			return fmt.Errorf("failed to open migration file '%s' for revert: %w", mf.Path, err)
@@ -536,38 +524,46 @@ func RunDown(cfg config.Config, steps int) error {
 
 		trimmedDownSQL := strings.TrimSpace(downSQL)
 
-		// Execute in Transaction
-		tx, err := ds.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to begin transaction for reverting migration %s: %w", migrationRecord.ID, err)
-		}
-
-		// Execute 'Down' SQL if present
-		if trimmedDownSQL != "" {
-			if _, err := tx.Exec(ctx, trimmedDownSQL); err != nil {
-				tx.Rollback() // Attempt rollback
-				return fmt.Errorf("failed to execute 'Down' SQL for migration %s: %w", migrationRecord.ID, err)
+		// Execute within a transaction
+		err = func() error {
+			txHandle, err := ds.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("failed to begin transaction for reverting migration %s: %w", migrationRecord.ID, err)
 			}
-			fmt.Printf("    Executed 'Down' SQL successfully for %s.\n", migrationRecord.ID)
-		} else {
-			fmt.Printf("    No 'Down' SQL found to execute for migration %s.\n", migrationRecord.ID)
+			defer txHandle.Rollback()
+
+			// Execute Down SQL if present
+			if trimmedDownSQL != "" {
+				fmt.Printf("    Executing Down SQL...\n")
+				if _, err := txHandle.Exec(ctx, trimmedDownSQL); err != nil {
+					return fmt.Errorf("failed to execute 'Down' SQL for migration %s: %w", migrationRecord.ID, err)
+				}
+				fmt.Printf("    'Down' SQL executed successfully.\n")
+			} else {
+				fmt.Printf("    No 'Down' SQL found to execute for migration %s.\n", migrationRecord.ID)
+			}
+
+			// Delete record from history table
+			deleteSQL := dialect.DeleteMigrationSQL(migrationTable)
+			if _, err := txHandle.Exec(ctx, deleteSQL, migrationRecord.ID); err != nil {
+				return fmt.Errorf("failed to delete migration %s from history table: %w", migrationRecord.ID, err)
+			}
+			fmt.Printf("    Removed migration %s from history table.\n", migrationRecord.ID)
+
+			// Commit
+			if err := txHandle.Commit(); err != nil {
+				return fmt.Errorf("failed to commit transaction for reverting migration %s: %w", migrationRecord.ID, err)
+			}
+			return nil // Success
+		}() // End anonymous func
+
+		if err != nil {
+			return err // Return error from transaction block
 		}
 
-		// Delete record from migration table
-		deleteSQL := dialect.DeleteMigrationSQL(migrationTable)
-		if _, err := tx.Exec(ctx, deleteSQL, migrationRecord.ID); err != nil {
-			tx.Rollback() // Attempt rollback
-			return fmt.Errorf("failed to delete migration %s from history table: %w", migrationRecord.ID, err)
-		}
-
-		// Commit transaction
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit transaction for reverting migration %s: %w", migrationRecord.ID, err)
-		}
-
-		fmt.Printf("--> Successfully reverted and removed migration %s.\n", migrationRecord.ID)
+		fmt.Printf("--> Successfully reverted migration %s.\n", migrationRecord.ID)
 		revertedCount++
-	}
+	} // end for migrationsToRevert
 
 	fmt.Printf("Finished reverting migrations. Reverted %d migration(s).\n", revertedCount)
 	return nil
