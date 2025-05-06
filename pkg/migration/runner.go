@@ -536,7 +536,7 @@ func RunUp(cfg config.Config) error {
 					}
 					goMig, found := getGoMigration(mf.ID)
 					if !found {
-						return fmt.Errorf("Go migration %s (%s) found on disk but not registered", mf.ID, mf.Name)
+						return fmt.Errorf("go migration %s (%s) found on disk but not registered", mf.ID, mf.Name)
 					}
 					fmt.Printf("    Executing Go migration Up()...\n")
 					// *** Pass dbHandle (*sql.DB) to the Go migration's Up method ***

@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql" // Use standard sql package for DB access in migrations
 	"fmt"
-	"sort"
 	"sync"
 )
 
@@ -23,10 +22,6 @@ type GoMigration interface {
 }
 
 // goMigrationEntry holds a registered Go migration.
-type goMigrationEntry struct {
-	ID        string // The unique migration ID (e.g., timestamp)
-	Migration GoMigration
-}
 
 var (
 	goMigrationsRegistry = make(map[string]GoMigration)
@@ -62,16 +57,4 @@ func getGoMigration(id string) (GoMigration, bool) {
 	defer goMigrationsMu.RUnlock()
 	migration, found := goMigrationsRegistry[id]
 	return migration, found
-}
-
-// getRegisteredGoMigrationIDs returns a sorted list of registered Go migration IDs.
-func getRegisteredGoMigrationIDs() []string {
-	goMigrationsMu.RLock()
-	defer goMigrationsMu.RUnlock()
-	ids := make([]string, 0, len(goMigrationsRegistry))
-	for id := range goMigrationsRegistry {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
 }

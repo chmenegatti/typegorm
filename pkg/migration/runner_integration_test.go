@@ -1,4 +1,3 @@
-// pkg/migration/runner_integration_test.go
 //go:build integration
 
 package migration
