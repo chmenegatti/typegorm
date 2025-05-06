@@ -37,6 +37,10 @@ func init() {
 // mysqlDialect implements the common.Dialect interface for MySQL/MariaDB.
 type mysqlDialect struct{}
 
+func (ds *mysqlDataSource) GetSQLDB() *sql.DB {
+	return ds.db
+}
+
 // (Keep existing Name, Quote, BindVar, GetDataType methods as they are)
 func (d *mysqlDialect) Name() string {
 	return "mysql"

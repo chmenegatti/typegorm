@@ -4,6 +4,7 @@ package migration
 import (
 	"bufio"
 	"context" // Need sql for TxOptions, maybe move to common later?
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -75,14 +76,17 @@ type migrationFile struct {
 	ID   string // Extracted ID (e.g., timestamp or sequence part of the name)
 	Path string // Full path to the file
 	Name string // Filename
+	Type string // "sql" or "go"
 }
 
 // findMigrationFiles scans the directory for valid migration files (e.g., *.sql)
 // and returns them sorted by ID.
+// migrationFile represents a migration file found on disk.
+// findMigrationFiles scans the directory for valid migration files (*.sql, *.go)
+// and returns them sorted by ID.
 func findMigrationFiles(dir string) ([]migrationFile, error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {
-		// Provide a clearer error message if the directory doesn't exist
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("migration directory '%s' not found", dir)
 		}
@@ -90,32 +94,47 @@ func findMigrationFiles(dir string) ([]migrationFile, error) {
 	}
 
 	var migrations []migrationFile
-	fmt.Printf("Scanning directory '%s' for migration files...\n", dir)
+	fmt.Printf("Scanning directory '%s' for migration files (.sql, .go)...\n", dir)
 	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".sql") { // Simple check for .sql files
+		fileName := file.Name()
+		if file.IsDir() {
 			continue
+		} // Skip directories
+
+		var fileType string
+		if strings.HasSuffix(fileName, ".sql") {
+			fileType = "sql"
+		} else if strings.HasSuffix(fileName, ".go") {
+			// Ignore test files
+			if strings.HasSuffix(fileName, "_test.go") {
+				continue
+			}
+			fileType = "go"
+		} else {
+			continue // Skip files with other extensions
 		}
 
 		// Extract ID from filename (e.g., "20230101120000_create_users.sql" -> "20230101120000")
-		// This assumes a convention like TIMESTAMP_description.sql or SEQUENCE_description.sql
-		parts := strings.SplitN(file.Name(), "_", 2)
-		if len(parts) < 1 { // Needs at least the ID part
-			fmt.Printf("Skipping file with unexpected name format: %s\n", file.Name())
+		baseName := strings.TrimSuffix(fileName, filepath.Ext(fileName)) // Remove extension
+		parts := strings.SplitN(baseName, "_", 2)
+		if len(parts) < 1 {
+			fmt.Printf("Skipping file with unexpected name format (missing underscore?): %s\n", fileName)
 			continue
 		}
 		id := parts[0]
-		// Basic validation: Ensure ID is not empty (could add more checks, e.g., digits only)
+		// Basic validation: Ensure ID is not empty (could add more checks)
 		if id == "" {
-			fmt.Printf("Skipping file with empty ID part: %s\n", file.Name())
+			fmt.Printf("Skipping file with empty ID part: %s\n", fileName)
 			continue
 		}
 
 		migrations = append(migrations, migrationFile{
 			ID:   id,
-			Path: filepath.Join(dir, file.Name()),
-			Name: file.Name(),
+			Path: filepath.Join(dir, fileName),
+			Name: fileName,
+			Type: fileType, // Store the type
 		})
-		fmt.Printf("  Found: %s (ID: %s)\n", file.Name(), id)
+		// fmt.Printf("  Found: %s (ID: %s, Type: %s)\n", fileName, id, fileType) // Reduced verbosity
 	}
 
 	// Sort migrations by ID to process them in order
@@ -337,8 +356,6 @@ func RunStatus(cfg config.Config) error {
 func RunUp(cfg config.Config) error {
 	fmt.Println("Running Migrate Up...")
 	ctx := context.Background()
-
-	// 1. Connect to DB
 	ds, err := getDataSource(cfg.Database)
 	if err != nil {
 		return fmt.Errorf("failed to initialize data source for migrate up: %w", err)
@@ -349,13 +366,9 @@ func RunUp(cfg config.Config) error {
 	if migrationTable == "" {
 		return fmt.Errorf("migration table name is not configured")
 	}
-
-	// 2. Ensure History Table Exists
 	if err := ensureMigrationsTable(ctx, ds, migrationTable); err != nil {
 		return err
 	}
-
-	// 3. Find Disk Migrations & Applied Migrations
 	diskMigrations, err := findMigrationFiles(cfg.Migration.Directory)
 	if err != nil {
 		return err
@@ -369,7 +382,6 @@ func RunUp(cfg config.Config) error {
 		appliedMap[rec.ID] = true
 	}
 
-	// 4. Determine & Execute Pending Migrations
 	pendingCount := 0
 	appliedCount := 0
 	fmt.Println("Applying pending migrations...")
@@ -378,41 +390,86 @@ func RunUp(cfg config.Config) error {
 			pendingCount++
 			fmt.Printf("--> Applying migration %s (%s)...\n", mf.ID, mf.Name)
 
-			// Read and parse SQL
-			file, err := os.Open(mf.Path)
-			if err != nil {
-				return fmt.Errorf("failed to open migration file '%s': %w", mf.Path, err)
-			}
-			upSQL, _, err := parseSQLMigration(file)
-			file.Close()
-			if err != nil {
-				return fmt.Errorf("failed to parse migration file '%s': %w", mf.Path, err)
-			}
-
-			trimmedUpSQL := strings.TrimSpace(upSQL)
-			if trimmedUpSQL == "" {
-				fmt.Printf("    Skipping migration %s: No 'Up' SQL found.\n", mf.ID)
-				// We still need to record it as applied even if empty
-			}
-
 			// Execute within a transaction
 			err = func() error { // Use anonymous func for easier tx management
-				txHandle, err := ds.BeginTx(ctx, nil) // Begin transaction
+				// *** Get underlying *sql.DB handle for Go migrations ***
+				// This assumes DataSource is our mysqlDataSource wrapping *sql.DB.
+				// A cleaner way might be to add a method to common.DataSource interface
+				// like `GetSQLDB() (*sql.DB, error)` but that's a bigger change.
+				// For now, we type assert (less ideal).
+				sqlDBGetter, ok := ds.(interface{ GetSQLDB() *sql.DB }) // Example interface check
+				var dbHandle *sql.DB
+				if ok {
+					dbHandle = sqlDBGetter.GetSQLDB()
+					if dbHandle == nil {
+						return fmt.Errorf("internal error: DataSource GetSQLDB returned nil for migration %s", mf.ID)
+					}
+				} else {
+					// If DataSource doesn't provide direct access, we cannot run Go migrations easily
+					// unless they accept the common.DataSource or common.Tx interface.
+					// Let's error for now if we can't get *sql.DB for a Go migration.
+					if mf.Type == "go" {
+						return fmt.Errorf("cannot run Go migration %s: underlying DataSource does not provide *sql.DB access", mf.ID)
+					}
+					// For SQL migrations, we can proceed using ds.BeginTx()
+				}
+
+				// Begin transaction using the common interface
+				txHandle, err := ds.BeginTx(ctx, nil)
 				if err != nil {
 					return fmt.Errorf("failed to begin transaction for migration %s: %w", mf.ID, err)
 				}
 				defer txHandle.Rollback() // Ensure rollback happens if commit isn't reached
 
-				// Execute Up SQL if present
-				if trimmedUpSQL != "" {
-					fmt.Printf("    Executing Up SQL...\n")
-					if _, err := txHandle.Exec(ctx, trimmedUpSQL); err != nil {
-						return fmt.Errorf("failed to execute 'Up' SQL for migration %s: %w", mf.ID, err)
+				// Execute based on type
+				switch mf.Type {
+				case "sql":
+					file, err := os.Open(mf.Path)
+					if err != nil {
+						return fmt.Errorf("failed to open migration file '%s': %w", mf.Path, err)
 					}
-					fmt.Printf("    'Up' SQL executed successfully.\n")
+					upSQL, _, err := parseSQLMigration(file)
+					file.Close() // Close promptly
+					if err != nil {
+						return fmt.Errorf("failed to parse migration file '%s': %w", mf.Path, err)
+					}
+					trimmedUpSQL := strings.TrimSpace(upSQL)
+					if trimmedUpSQL != "" {
+						fmt.Printf("    Executing Up SQL...\n")
+						// Use the transaction handle's Exec
+						if _, err := txHandle.Exec(ctx, trimmedUpSQL); err != nil {
+							return fmt.Errorf("failed to execute 'Up' SQL for migration %s: %w", mf.ID, err)
+						}
+						fmt.Printf("    'Up' SQL executed successfully.\n")
+					} else {
+						fmt.Printf("    Skipping migration %s: No 'Up' SQL found.\n", mf.ID)
+					}
+				case "go":
+					// Need the *sql.DB handle for the GoMigration interface method
+					if dbHandle == nil { // Double check (should have errored earlier)
+						return fmt.Errorf("cannot run Go migration %s: could not get *sql.DB handle", mf.ID)
+					}
+					goMig, found := getGoMigration(mf.ID)
+					if !found {
+						return fmt.Errorf("Go migration %s (%s) found on disk but not registered", mf.ID, mf.Name)
+					}
+					fmt.Printf("    Executing Go migration Up()...\n")
+					// *** Pass dbHandle (*sql.DB) to the Go migration's Up method ***
+					// NOTE: This Up method runs OUTSIDE the common.Tx managed by txHandle.
+					// This is a limitation if we can't get *sql.Tx from common.Tx.
+					// For simplicity now, we run Go migration directly on *sql.DB.
+					// A better approach would be to pass common.Tx or require Go migrations
+					// to handle their own transactions if needed, or enhance common.Tx.
+					if err := goMig.Up(ctx, dbHandle); err != nil {
+						// Attempting rollback via txHandle might be ineffective if GoMig.Up committed something itself.
+						return fmt.Errorf("failed to execute 'Up' method for Go migration %s: %w", mf.ID, err)
+					}
+					fmt.Printf("    Go migration Up() executed successfully.\n")
+				default:
+					return fmt.Errorf("unknown migration type '%s' for file %s", mf.Type, mf.Name)
 				}
 
-				// Record migration in history table
+				// Record migration in history table (always done via the transaction handle)
 				insertSQL := dialect.InsertMigrationSQL(migrationTable)
 				appliedTimestamp := time.Now().UTC()
 				if _, err := txHandle.Exec(ctx, insertSQL, mf.ID, appliedTimestamp); err != nil {
@@ -424,13 +481,12 @@ func RunUp(cfg config.Config) error {
 				if err := txHandle.Commit(); err != nil {
 					return fmt.Errorf("failed to commit transaction for migration %s: %w", mf.ID, err)
 				}
-				return nil // Success
+				return nil // Success for this migration
 			}() // End anonymous func
 
 			if err != nil {
-				return err // Return error from transaction block
-			}
-
+				return err
+			} // Return error from transaction block
 			fmt.Printf("--> Successfully applied migration %s.\n", mf.ID)
 			appliedCount++
 		} // end if !applied
@@ -454,8 +510,6 @@ func RunDown(cfg config.Config, steps int) error {
 	}
 	fmt.Printf("  Steps to revert: %d\n", steps)
 	ctx := context.Background()
-
-	// 1. Connect to DB
 	ds, err := getDataSource(cfg.Database)
 	if err != nil {
 		return fmt.Errorf("failed to initialize data source for migrate down: %w", err)
@@ -466,13 +520,9 @@ func RunDown(cfg config.Config, steps int) error {
 	if migrationTable == "" {
 		return fmt.Errorf("migration table name is not configured")
 	}
-
-	// 2. Ensure History Table Exists (optional but good check)
 	if err := ensureMigrationsTable(ctx, ds, migrationTable); err != nil {
 		return err
-	}
-
-	// 3. Get Applied Migrations (Ordered DESC)
+	} // Check table exists
 	appliedMigrations, err := getAppliedMigrationsOrdered(ctx, ds, migrationTable, "DESC")
 	if err != nil {
 		return err
@@ -481,15 +531,11 @@ func RunDown(cfg config.Config, steps int) error {
 		fmt.Println("No migrations have been applied yet. Nothing to revert.")
 		return nil
 	}
-
-	// 4. Determine Migrations to Revert
 	if steps > len(appliedMigrations) {
 		fmt.Printf("Requested %d steps rollback, but only %d migrations are applied. Reverting all.\n", steps, len(appliedMigrations))
 		steps = len(appliedMigrations)
 	}
 	migrationsToRevert := appliedMigrations[:steps]
-
-	// 5. Find Corresponding Disk Files (build map for lookup)
 	diskFiles, err := findMigrationFiles(cfg.Migration.Directory)
 	if err != nil {
 		return fmt.Errorf("cannot find migration files needed for rollback: %w", err)
@@ -499,48 +545,68 @@ func RunDown(cfg config.Config, steps int) error {
 		diskFilesMap[mf.ID] = mf
 	}
 
-	// 6. Process Reverts
 	revertedCount := 0
 	fmt.Printf("Reverting the last %d applied migration(s)...\n", len(migrationsToRevert))
 	for _, migrationRecord := range migrationsToRevert {
 		fmt.Printf("--> Reverting migration %s...\n", migrationRecord.ID)
-
-		// Find file
 		mf, found := diskFilesMap[migrationRecord.ID]
 		if !found {
 			return fmt.Errorf("cannot revert migration %s: corresponding file not found in %s", migrationRecord.ID, cfg.Migration.Directory)
 		}
 
-		// Parse file for Down SQL
-		file, err := os.Open(mf.Path)
-		if err != nil {
-			return fmt.Errorf("failed to open migration file '%s' for revert: %w", mf.Path, err)
-		}
-		_, downSQL, err := parseSQLMigration(file)
-		file.Close()
-		if err != nil {
-			return fmt.Errorf("failed to parse migration file '%s' for revert: %w", mf.Path, err)
-		}
-
-		trimmedDownSQL := strings.TrimSpace(downSQL)
-
 		// Execute within a transaction
 		err = func() error {
+			// Get *sql.DB handle if needed for Go migration
+			sqlDBGetter, _ := ds.(interface{ GetSQLDB() *sql.DB })
+			var dbHandle *sql.DB
+			if sqlDBGetter != nil {
+				dbHandle = sqlDBGetter.GetSQLDB()
+			}
+			if mf.Type == "go" && dbHandle == nil {
+				return fmt.Errorf("cannot run Go migration Down() %s: underlying DataSource does not provide *sql.DB access", mf.ID)
+			}
+
 			txHandle, err := ds.BeginTx(ctx, nil)
 			if err != nil {
 				return fmt.Errorf("failed to begin transaction for reverting migration %s: %w", migrationRecord.ID, err)
 			}
 			defer txHandle.Rollback()
 
-			// Execute Down SQL if present
-			if trimmedDownSQL != "" {
-				fmt.Printf("    Executing Down SQL...\n")
-				if _, err := txHandle.Exec(ctx, trimmedDownSQL); err != nil {
-					return fmt.Errorf("failed to execute 'Down' SQL for migration %s: %w", migrationRecord.ID, err)
+			// Execute Down logic based on type
+			switch mf.Type {
+			case "sql":
+				file, err := os.Open(mf.Path)
+				if err != nil {
+					return fmt.Errorf("failed to open migration file '%s' for revert: %w", mf.Path, err)
 				}
-				fmt.Printf("    'Down' SQL executed successfully.\n")
-			} else {
-				fmt.Printf("    No 'Down' SQL found to execute for migration %s.\n", migrationRecord.ID)
+				_, downSQL, err := parseSQLMigration(file)
+				file.Close()
+				if err != nil {
+					return fmt.Errorf("failed to parse migration file '%s' for revert: %w", mf.Path, err)
+				}
+				trimmedDownSQL := strings.TrimSpace(downSQL)
+				if trimmedDownSQL != "" {
+					fmt.Printf("    Executing Down SQL...\n")
+					if _, err := txHandle.Exec(ctx, trimmedDownSQL); err != nil {
+						return fmt.Errorf("failed to execute 'Down' SQL for migration %s: %w", migrationRecord.ID, err)
+					}
+					fmt.Printf("    'Down' SQL executed successfully.\n")
+				} else {
+					fmt.Printf("    No 'Down' SQL found to execute for migration %s.\n", migrationRecord.ID)
+				}
+			case "go":
+				goMig, found := getGoMigration(mf.ID)
+				if !found {
+					return fmt.Errorf("Go migration %s (%s) applied but not registered", mf.ID, mf.Name)
+				}
+				fmt.Printf("    Executing Go migration Down()...\n")
+				// See note in RunUp about running Go migrations outside common.Tx
+				if err := goMig.Down(ctx, dbHandle); err != nil {
+					return fmt.Errorf("failed to execute 'Down' method for Go migration %s: %w", mf.ID, err)
+				}
+				fmt.Printf("    Go migration Down() executed successfully.\n")
+			default:
+				return fmt.Errorf("unknown migration type '%s' for file %s", mf.Type, mf.Name)
 			}
 
 			// Delete record from history table
@@ -558,9 +624,8 @@ func RunDown(cfg config.Config, steps int) error {
 		}() // End anonymous func
 
 		if err != nil {
-			return err // Return error from transaction block
-		}
-
+			return err
+		} // Return error from transaction block
 		fmt.Printf("--> Successfully reverted migration %s.\n", migrationRecord.ID)
 		revertedCount++
 	} // end for migrationsToRevert
