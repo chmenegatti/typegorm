@@ -6,6 +6,7 @@ import (
 	"context" // Need sql for TxOptions, maybe move to common later?
 	"database/sql"
 	"fmt"
+	"html/template"
 	"io"
 	"os"
 	"path/filepath"
@@ -224,45 +225,129 @@ func parseSQLMigration(r io.Reader) (string, string, error) {
 	return upSQL.String(), downSQL.String(), nil
 }
 
+// --- NEW: Go Migration Template ---
+const goMigrationTemplate = `package migrations
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+
+	// Import the migration package to register the migration
+	"github.com/chmenegatti/typegorm/pkg/migration" // Adjust import path if needed
+)
+
+func init() {
+	migration.RegisterGoMigration("{{.ID}}", &{{.StructName}}{})
+}
+
+// {{.StructName}} implements the migration interface
+type {{.StructName}} struct{}
+
+// Up defines the forward migration logic
+func (m *{{.StructName}}) Up(ctx context.Context, db *sql.DB) error {
+	fmt.Println("Applying migration: {{.Name}} (ID: {{.ID}})")
+	// Example: Create table
+	// _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS my_new_table (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255));")
+	// if err != nil {
+	//     return fmt.Errorf("failed to create my_new_table: %w", err)
+	// }
+	fmt.Println("Implement Up migration logic for {{.Name}} here")
+	return nil // Return nil on success
+}
+
+// Down defines the rollback migration logic
+func (m *{{.StructName}}) Down(ctx context.Context, db *sql.DB) error {
+	fmt.Println("Reverting migration: {{.Name}} (ID: {{.ID}})")
+	// Example: Drop table
+	// _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS my_new_table;")
+	// if err != nil {
+	// 	   return fmt.Errorf("failed to drop my_new_table: %w", err)
+	// }
+	fmt.Println("Implement Down migration logic for {{.Name}} here")
+	return nil // Return nil on success
+}
+
+`
+
+type TemplateData struct {
+	ID         string
+	Name       string
+	StructName string
+}
+
 // --- Runner Function Implementation ---
 
 // RunCreate creates a new migration file.
 // (Keep existing implementation - may need minor adjustments later)
-func RunCreate(cfg config.Config, name string) error {
+func RunCreate(cfg config.Config, name string, migrationType string) error {
 	fmt.Println("Running Create Migration...")
+	migrationsDir := cfg.Migration.Directory
+	if migrationsDir == "" {
+		return fmt.Errorf("migration directory not configured")
+	}
 	fmt.Printf("  Name: %s\n", name)
-	fmt.Printf("  Directory: %s\n", cfg.Migration.Directory)
+	fmt.Printf("  Type: %s\n", migrationType)
+	fmt.Printf("  Directory: %s\n", migrationsDir)
 
 	if name == "" {
 		return fmt.Errorf("migration name cannot be empty")
 	}
 
-	// Simple timestamp prefix
 	timestamp := time.Now().UTC().Format("20060102150405")
-	// Basic sanitization of name (replace spaces, convert to lower)
 	safeName := strings.ToLower(strings.ReplaceAll(name, " ", "_"))
-	filename := fmt.Sprintf("%s_%s.sql", timestamp, safeName)
-	filepath := filepath.Join(cfg.Migration.Directory, filename)
+	baseFilename := fmt.Sprintf("%s_%s", timestamp, safeName)
+
+	var filePath string
+	var fileContent []byte
+
+	if migrationType == "sql" {
+		filePath = filepath.Join(migrationsDir, baseFilename+".sql")
+		contentStr := fmt.Sprintf("-- Migration: %s\n-- Created at: %s UTC\n\n%s\n\n\n\n%s\n\n",
+			name, time.Now().UTC().Format(time.RFC3339), markerUp, markerDown)
+		fileContent = []byte(contentStr)
+	} else if migrationType == "go" {
+		filePath = filepath.Join(migrationsDir, baseFilename+".go")
+		// Create a struct name from the migration name (e.g., AddUserTable -> AddUserTableMig)
+		structName := strings.ReplaceAll(strings.Title(strings.ReplaceAll(name, "_", " ")), " ", "") + "Mig"
+
+		tmpl, err := template.New("gomigration").Parse(goMigrationTemplate)
+		if err != nil {
+			return fmt.Errorf("failed to parse go migration template: %w", err)
+		}
+
+		data := TemplateData{
+			ID:         timestamp,
+			Name:       name, // Use original name for comments
+			StructName: structName,
+		}
+
+		var buf strings.Builder
+		if err := tmpl.Execute(&buf, data); err != nil {
+			return fmt.Errorf("failed to execute go migration template: %w", err)
+		}
+		fileContent = []byte(buf.String())
+	} else {
+		return fmt.Errorf("invalid migration type specified: %s", migrationType) // Should be caught by CLI flag validation
+	}
 
 	// Ensure directory exists
-	if err := os.MkdirAll(cfg.Migration.Directory, os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create migration directory '%s': %w", cfg.Migration.Directory, err)
+	if err := os.MkdirAll(migrationsDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create migration directory '%s': %w", migrationsDir, err)
 	}
 
 	// Check if file already exists
-	if _, err := os.Stat(filepath); !os.IsNotExist(err) {
-		return fmt.Errorf("migration file already exists: %s", filepath)
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		return fmt.Errorf("migration file already exists: %s", filePath)
 	}
 
-	// Create basic SQL file content
-	content := fmt.Sprintf("-- Migration: %s\n-- Created at: %s UTC\n\n%s\n\n\n\n%s\n\n", name, time.Now().UTC().Format(time.RFC3339), markerUp, markerDown)
-
-	err := os.WriteFile(filepath, []byte(content), 0644)
+	// Write the file
+	err := os.WriteFile(filePath, fileContent, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to write migration file '%s': %w", filepath, err)
+		return fmt.Errorf("failed to write migration file '%s': %w", filePath, err)
 	}
 
-	fmt.Printf("Successfully created migration file: %s\n", filepath)
+	fmt.Printf("Successfully created migration file: %s\n", filePath)
 	return nil
 }
 
@@ -597,7 +682,7 @@ func RunDown(cfg config.Config, steps int) error {
 			case "go":
 				goMig, found := getGoMigration(mf.ID)
 				if !found {
-					return fmt.Errorf("Go migration %s (%s) applied but not registered", mf.ID, mf.Name)
+					return fmt.Errorf("go migration %s (%s) applied but not registered", mf.ID, mf.Name)
 				}
 				fmt.Printf("    Executing Go migration Down()...\n")
 				// See note in RunUp about running Go migrations outside common.Tx

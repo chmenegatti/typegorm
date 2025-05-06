@@ -3,34 +3,44 @@ package main
 
 import (
 	"fmt"
-	// Import only necessary packages
+	"strings" // Import strings
+
+	"github.com/chmenegatti/typegorm/pkg/migration" // Use correct import path
 	"github.com/spf13/cobra"
-	// Import the migration package
-	"github.com/chmenegatti/typegorm/pkg/migration"
 )
+
+var migrationType string // Variable to hold the --type flag value
 
 var migrateCreateCmd = &cobra.Command{
 	Use:   "create <migration_name>",
-	Short: "Create a new SQL migration file",
-	Long: `Creates a new timestamped SQL migration file in the configured migration directory.
-The name should be descriptive, e.g., "AddUserTable" or "CreateProductsIndex".
-Example: typegorm migrate create AddUserTable`,
-	Args: cobra.ExactArgs(1), // Requires exactly one argument: the migration name
+	Short: "Create a new migration file (.sql or .go)",
+	Long: `Creates a new migration file with the current timestamp and the provided name.
+Use the --type flag to specify 'sql' (default) or 'go'.`,
+	Args: cobra.ExactArgs(1), // Expect exactly one argument: the migration name
 	RunE: func(cmd *cobra.Command, args []string) error {
 		migrationName := args[0]
-		fmt.Printf("Executing 'migrate create' for name: %s\n", migrationName)
+		migrationType = strings.ToLower(migrationType) // Normalize type
 
-		// Call the RunCreate function, passing the loaded config and the migration name from args
-		err := migration.RunCreate(cfg, migrationName)
-		if err != nil {
-			return fmt.Errorf("migration create command failed: %w", err)
+		if migrationType != "sql" && migrationType != "go" {
+			return fmt.Errorf("invalid migration type '%s', must be 'sql' or 'go'", migrationType)
 		}
-		// Success message is handled within RunCreate
+
+		// cfg is loaded by rootCmd's PersistentPreRunE
+		fmt.Printf("Running migrate create for '%s' (type: %s)...\n", migrationName, migrationType)
+
+		// Pass the type to RunCreate
+		err := migration.RunCreate(cfg, migrationName, migrationType)
+		if err != nil {
+			return fmt.Errorf("failed to create migration file: %w", err)
+		}
+
+		// Success message printed by RunCreate
 		return nil
 	},
 }
 
 func init() {
 	migrateCmd.AddCommand(migrateCreateCmd)
-	// Flags specific to 'migrate create', if any (e.g., --type=go in the future)
+	// Add the --type flag
+	migrateCreateCmd.Flags().StringVarP(&migrationType, "type", "t", "sql", "Type of migration file to create ('sql' or 'go')")
 }
